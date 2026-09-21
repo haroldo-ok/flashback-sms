@@ -1,0 +1,14 @@
+symbols flashback.noi
+run 60
+print game_state w1
+print fmv_active w1
+print fmv_tick
+print fmv_uploads
+print is_pal w1
+expectvdp display 1
+screenshot shots/sms/smoke_60.ppm
+run 400
+print fmv_tick
+print fmv_uploads
+expectcolors 3
+screenshot shots/sms/smoke_460.ppm

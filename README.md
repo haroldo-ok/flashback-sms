@@ -1,243 +1,308 @@
-# Flashback: The Quest for Identity — Sega Master System (merged 4 MB build)
+# Flashback (DOS demo) → Sega Master System
 
-A single 4 MB `.sms` ROM that **combines the two partial ports**:
+**Status: milestone 3 in progress.** The cutscenes, the room backgrounds of the
+demo's three levels, and a *replay* of real level-1 gameplay (Conrad, monsters
+and objects as hardware sprites) all run from a 4 MB ROM, checked pixel-exact
+against a host model of the same ROM bytes.  The **first slice of the game logic** now runs on the
+Z80: each level's live object table is built from the level data exactly as
+the original engine builds it, and the result is checked against the engine.
+The rest of the logic (the object script interpreter, collision, input) is not
+ported yet, so the gameplay you see is still the recorded replay, and there is
+no sound.
 
-| comes from | what it contributes |
+## Build
+```
+make fbdump                        # headless extractor (links REminiscence, GPL)
+make capture DEMO=path/to/DATA     # real engine renders -> capture/*.fbv, rooms_L*.fbr
+make convert                       # cutscene encoder + room converter + bank packer
+make verify                        # decode the packed bytes, compare with the captures
+make                               # -> flashback.sms (4096 KB)
+make check                         # emulator playtest + pixel-exact comparison
+```
+Needs SDCC ≥ 4.2 and devkitSMS (`~/.devkitsms`), plus Python 3 with numpy and Pillow.
+
+## What's in the ROM
+| | |
 |---|---|
-| `flashback_level1_sms_sources.zip` | the playable **Titan Jungle (level 1)**: real DOS-demo room data (backgrounds, collision grids, room links), Conrad's full moveset, room transitions, floor objects |
-| `flashback_video_sms_src.zip` | the **FMV cutscene engine**: Delphine Software logo, cinematic intro parts 1–2, debut/jungle-crash scene, holocube message, object recovery, disintegration |
+| Cutscenes | all 34 in the demo. They share one tile dictionary (45,804 tiles, 1.47 MB), and VRAM acts as a cache for 768 cells. Mean error from ideal is 0.0–2.3% per clip. |
+| Rooms | 163 room slots, 97 unique images, from levels 1, 3 and 5. The full 256×224 room fills the 32×28 nametable and scrolls vertically. |
+| Simulated gameplay | the ported logic drives the sprite renderer: 3820 8x16 sprites (245 KB) keyed by animation number, streaming through 32 VRAM slots.  This replaced the recorded replay, which is no longer in the ROM. |
+| Level data | object tables, node maps and animation records for all three levels (~50 KB each, bank-safe so no record straddles a 16K bank) |
+| Code | 5.8 KB of the 32 KB code area; 4.2 KB of the 8 KB RAM (mostly the 180-entry live object table) |
+| Space left | ~190 KB (the cutscene dictionary is merged at 4 pixels, saving 532 KB; cutscene error 0.96% mean) |
 
-…plus the work both were missing: **the videos were re-encoded so that all seven
-cutscenes share one dictionary of tiles**, the item art was completed, and
-**picking an object up now plays the cutscene that belongs to it**.
+## Controls (viewer)
+Boot plays the original intro sequence (0x40, then 0x0D + 0x4A); button 1 skips it.
+In the room viewer: left/right changes room, up/down scrolls, button 1 plays the
+next cutscene, and button 2 runs the ported game logic and draws what it
+simulates (hold button 1 to leave).
 
-```
-Flashback_SMS.sms   4 MiB, 256 banks, Sega mapper, checksum + 4 MB size header fixed
-```
+## How gameplay graphics were derived
+`fbdump replay` runs the original engine headless on the game's own recorded
+demo inputs, with two hooks added to the (GPL) engine: one on every sprite blit
+and one per drawn game frame.  Each trace holds the engine's composited layer,
+its palette, and every sprite it drew, so the SMS converters never guess and
+the same traces become the oracle for the game-logic port.
 
----
+Findings that shaped the design:
+* tiles are cut relative to each sprite's own origin, not the screen grid, so a
+  sprite that merely moves costs no upload (uploads 11 -> 9 per frame)
+* 8x16 sprites halved the sprite count to 18/frame and cut budget skips 179 -> 18
+* objects, not characters, cause the 8-per-line overflow; with characters alone
+  level 1 exceeds 8 on only 3% of frames
+* sprite order rotates each frame so overflow flickers instead of vanishing,
+  with Conrad pinned first; sprites are lost on 8% of frames, 0.2 per frame
+* room palette index 0 is reserved so foreground tiles reliably hide sprites
+  (it cost no colours: every room uses 15 or fewer)
 
-## 1. What the finished ROM does
+## Game logic so far
+`src/pge.c` ports `pge_loadForCurrentLevel()` and `pge_setupDefaultAnim()`: it
+walks the level's InitPGE records, derives each object's flags, finds its entry
+point in the node's object list, and takes the starting animation frame from
+the animation record.  For every level the Z80's object count, active-object
+count and a checksum over (entry point, flags, life, room, animation number)
+match the original engine exactly.
 
-**Playable game (level 1, Titan Jungle)**
+## The interpreter, so far
+`src/logic.c` ports the frame loop, the message queue, the animation advance,
+the object-script walk and the opcode dispatch, plus a first tranche of
+opcodes.  It is self-checking: the ROM carries, for every 30 Hz frame of the
+recorded demo, the input byte the engine consumed and a checksum of every
+object's state afterwards, so the port reports exactly where it first differs
+from the original and which opcode it could not run.
 
-* 38 converted DOS-demo rooms (rooms 26…63) with the original backgrounds,
-  palettes and collision grids, linked up/down/left/right exactly like the demo.
-* Conrad: idle, walk, run, jump, crouch, shoot, crouch-shoot, ledge grab, climb,
-  hang/drop — all with the original rotoscoped frames (346 frames, banks 40–42).
-* Room-to-room transitions by walking/falling off an edge, vertical camera
-  follow, gun/laser SFX (SN76489), shield HUD.
-* 15 floor objects across the level (`GLOBAL.ICN` icons; the item art is now
-  complete — the level-1 build only had icon #12 in slot 0, every other item
-  showed garbage/blank tiles).
+The collision system is ported too: the 16x7 room grid from the level's CT
+table, the collision slots that chain objects sharing a grid cell, grid
+lookups across room edges, and the collide tests the opcodes use.
 
-**Cutscenes (FMV) — 932 frames total**
+Objects can also write into the collision grid, and those writes last for the
+rest of the level - but on the SMS the grid is in ROM, so modified spans are
+kept in a small RAM overlay that every grid read consults.  Inventory lists
+(pick up, reorder, drop) are ported as well.
 
-| cutscene | frames | plays when |
+Room tracking is ported: objects wrap across room edges through the CT links,
+the per-room lists are maintained, and Conrad's room becomes the current one
+at the *end* of the frame (the engine's `_loadMap`), which is why the first
+frame still runs in the level's default room.  Entering a room also reactivates
+the objects there, and the ones just above and below it.
+
+A pending message also makes an object jump to the end of its current
+animation before its script runs (`pge_messageAck`), which is how objects
+react on the frame after they are hit; that is ported too.
+
+Hit detection is ported too, both the melee form (`col_detectHit`) and the gun
+(`col_detectGunHit`): sweeping the grid cells in front of or behind an object
+until the shot meets solid ground or something it can hit, and sending
+whatever it hits the message that matches the shooter's facing.
+
+Current state: **the first 504 frames of the level-1 demo match the original
+engine exactly** - every one of the 107 objects, on position, animation
+number, object type, flags, room, animation sequence and entry point.  That is
+about 17 seconds of real gameplay reproduced tick for tick.  At frame 504
+every opcode the demo reaches is ported, so the remaining difference is
+behavioural, to be chased the same way as the earlier ones.
+
+Opcodes ported so far (~60 of the ~75 this demo reaches): the full input-test
+group (0x01-0x0A, 0x35), the whole grid-collision family (0x0B-0x21, 0x28-0x2A),
+message tests and sends (0x22-0x26, 0x6B, 0x6F), counters (0x3E, 0x3F, 0x44,
+0x59), the Conrad-direction tests (0x78, 0x79), the collide tests (0x3D, 0x50,
+0x7E, 0x7F), collision grid writes (0x36, 0x37), inventory (0x30, 0x73), the
+gun variable (0x8A, 0x8B), inventory use and drop (0x31-0x34, 0x6D, 0x6E),
+the hit tests (0x62, 0x63), the gun (0x64), the ground sweep (0x5F), kill and
+room tests (0x4B, 0x4C), locate-message drop (0x60), grid snap (0x88),
+touch-message (0x7C), cutscene queue (0x5A), sound as no-ops with the engine's return values
+(0x7D, 0x87), 0x27, 0x2E, 0x43, 0x4D, 0x61 and 0x83.  `pge_execute`'s tail is ported too:
+an object record can turn the object around, change its life and move it by
+its own dx/dy.
+
+## Sizing the interpreter port (measured, not estimated)
+The engine's opcode table has 101 entries.  Counting which ones *actually
+execute* (a hook in `pge_execute`, reported by `fbdump replay`) gives the real
+scope, and it is most of the table:
+
+| demo | frames | distinct opcodes | executions |
+|---|---|---|---|
+| level 1 | 1954 | 75 | 40,592 |
+| level 5 | 2047 | 87 | 72,024 |
+| level 3 | 2046 | 84 | 31,694 |
+
+The requirement grows with playtime rather than concentrating in a few
+opcodes - level 1 needs 22 to reach frame 25, 45 by frame 200, 75 by the end -
+so the port has to be staged by first use and checked continuously, not built
+from a "top N opcodes" shortcut.
+
+To support that, each traced frame now also carries the state the interpreter
+must reproduce: for every object its position, animation number, object type,
+flags, room, animation sequence and entry point, plus the demo input byte for
+that frame.  That is the tick-by-tick oracle the Z80 interpreter will be
+checked against.
+
+## A bug worth remembering
+Firing the gun and picking up an item both "froze" the game, with the picture
+intact and no watchdog red screen.  Neither was a hang: when the interpreter
+meets an opcode that is not ported yet it sets a flag so the verification
+harness can report the first divergence - and that flag was sticky and global,
+so from then on **no object was processed at all**.  The machine kept running
+and drawing the frame it had reached.  Shooting and picking things up are
+exactly the actions whose scripts reach unported opcodes.
+
+The flag now stops the harness only; while playing, an unported opcode is
+skipped and the game carries on.  The opcodes level 1 actually needs were then
+ported by checking the level's own object data against the implemented set -
+27 were missing, including `pickupObject` itself.
+
+## The demo build
+The default build is a self-contained demo of level 1:
+
+* the intro cutscenes, then the game's own title screen (captured from the
+  engine and converted like a room: 447 tiles, 10% pixel error on a
+  photographic image)
+* any button starts level 1, after level 1's own intro cutscene (clip 0x00)
+* the level itself, its objects and animations; PAUSE returns to the title
+* the other levels and the room viewer are not built in
+* items are visible and can be picked up.  The engine draws collectibles
+  with its blit that ignores the foreground mask, so they sit on top of
+  scenery; an SMS sprite cannot override a background tile's priority, so the
+  priority bit is cleared on the few cells under each item when a room loads.
+  Without that, an item tucked into foliage - the cube near the start of
+  level 1 is one - was drawn but completely hidden.
+* `DICT_MERGE ?= 0`: the cutscene tile merge is off.  It saved ~530 KB but
+  flat-shaded polygon artwork is exactly the case it damages most, so the
+  cutscenes are stored unmerged.
+
+The whole thing is 2 MB.
+
+## Playing it
+From the title screen any button starts the game.  The d-pad moves, button 2
+is the action key, button 1 is the run key, both together are the third key,
+and the console's PAUSE button returns to the title.
+
+The input goes through the engine's own `pge_getInput`, which never sees a
+diagonal: with both axes held it keeps the modifiers and the last purely
+horizontal direction.  So the jump is **button 1 + up with no direction
+held** - Conrad leaps forward the way he is facing, and that same command is
+the running jump (build up speed with a direction, release it, then button 1 +
+up).  Holding up *together* with a direction just keeps you running, exactly
+as in the original.
+
+A cutscene the game itself asks for (opcode 0x5A) is played by the front end
+and returns to the game afterwards.  Playing starts where the level itself
+starts (room 27), not where the recorded demo started.
+
+## Simulated gameplay
+`src/sim.c` draws the objects the interpreter simulates.  Every animation frame the engine can draw - all 1771 (animation, mirror)
+pairs over 923 animation numbers, in both mirrored and unmirrored form, rendered straight from the game's sprite
+resources rather than harvested from a recorded demo - is stored once as 8x16
+sprite tiles positioned relative to the object's own position, so an object
+can be drawn from its simulated state alone.  Building the table from a demo
+was a false start: free play immediately reaches frames the demo never showed,
+and Conrad simply vanished.  Two further traps: sprites are mirrored by flag bit 1 (0x02), the *effective*
+mirror computed from the facing and the frame's own flip, not by the facing
+bit itself - keying on the facing bit made the character face the wrong way.
+And characters and level objects are numbered in the SAME animation space but
+come from different resources, so the kind (flag bit 3) is part of the key
+too; without it, items were drawn as frames of the player.  The renderer keeps 32 sprite slots in VRAM
+and streams patterns in as animations change.  The recorded replay has been
+removed from the ROM: this supersedes it.
+
+Boot: the ROM goes straight to the intro.  The self-test (level tables plus
+the interpreter checked against the recorded demo) is a **build option**,
+`make SELF_TEST=1`, used by `make check`.  It used to be a button held at
+boot, which was a bad idea: a pad that reports a button pressed at power-on
+made a normal boot sit on a black screen for a minute and look frozen.
+
+**Bank layout matters on real emulators.**  Everything gameplay needs - rooms,
+level tables, sprites - is packed into the LOW banks, and the cutscene
+dictionary and streams (by far the bulkiest data, and the only part a game can
+do without) go above them.  An emulator that cannot reach the highest banks
+therefore loses cutscenes rather than the game.  `make small` builds a
+cut-down 2 MB ROM (level 1, no cutscenes) whose data ends around bank 70, for
+emulators with a lower mapper limit.  `tools/`-built `banktest.sms` reports how
+many banks an emulator actually reaches.
+
+Known gap: a simulated frame still takes about 3.3 times its 30 Hz budget
+(6.6 frames of CPU per 30 Hz step, down from 8.4).
+
+`tools/smstest` now has a sampling profiler (`profstart` / `profstop` /
+`profdump`) that attributes cycles to the program counter, so this is measured
+rather than guessed.  Where a simulated frame goes:
+
+| share | cycles/frame | |
 |---|---|---|
-| Delphine Software logo | 153 | boot |
-| Cinematic intro part 1 | 260 | title menu → 2. CINEMATIC INTRO (then part 2) |
-| Cinematic intro part 2 (Titan crash) | 380 | automatically after part 1 |
-| Holocube message | 35 | title menu → 3, **and when Conrad picks up the holocube** |
-| Jungle debut | 50 | title menu → 1. START GAME, before level 1 |
-| Object recovery | 35 | **whenever Conrad picks up any other floor object** |
-| Disintegration (game over) | 19 | reaching room 63, the end of the demo |
+| 56% | 219k | the interpreter's internals (collision prep, script walk, animation setup) |
+| 18% | 71k | the per-frame object loops in `logic_step` |
+| 18% | 70k | `sim_step`, the sprite renderer loop (was 148k) |
 
-Every cutscene can be skipped with button **1** or **2**; afterwards play resumes
-exactly where it left off (room, position, item already gone).
+Optimisations that worked: computing the state checksum only for the
+verification harness (25% of the harness frame), replacing the room-coordinate
+divisions by 72 and 36 with comparison chains (9%), walking a pointer over the
+object table instead of indexing it, which costs a 22-byte multiply per object
+on a Z80 (5%), and reading sprite parts straight from ROM - re-mapping the bank
+per part - instead of copying the part list into RAM first (7%).
 
-**Controls** — D-pad move · **1** jump (also climb when hanging) · **2** run / draw+fire
-blaster / **pick up floor object** · **1** while walking = run · Down **2** = crouch-aim.
+No measurable difference: a hash index for grid cells, incremental grid
+stepping, hoisting multiplies out of the sprite loops, and SDCC's
+`--opt-code-speed`.
 
----
+Profiling down to the assembly (bucket addresses mapped through `build/*.lst`)
+shows the remaining cost is spread across SDCC's stack-frame addressing - most
+hot instructions are `ix`-relative loads of locals, at 19 cycles each.  The
+wins therefore come from doing less work, not from tightening expressions.
 
-## 2. How to build it
+The largest so far: the renderer now walks the interpreter's own per-room
+object list instead of scanning all 107 objects every frame, which more than
+halved it (148k -> 70k, 12% off the whole frame).  The same treatment is the
+obvious next step for the interpreter's own loops, where the remaining 219k
+sits: collision prep, the script walk and animation setup, measured at 54k,
+30k and 25k per frame respectively.
 
-```sh
-# one-time: SDCC ≥ 4.2 + devkitSMS toolchain + the smstest harness
-bash <skill>/scripts/setup_toolchain.sh          # installs into ~/.devkitsms
+A warning for whoever continues: do not profile by disabling parts of the
+frame.  Most parts change what the game simulates, so the run takes a
+different, cheaper path and the timing is meaningless - that mistake sent
+three optimisations at the wrong target before the profiler existed.
 
-cd sms
-make            # -> flashback.sms (4 MiB)
-make playtest   # -> runs tests/playtest.txt in the headless smstest emulator
-```
+## Verified
+- `make check`: every playtest assertion passes. Each clip the Z80 plays to its end consumes exactly the tick and upload counts that the host decoder derives from the same ROM bytes. Four high-motion cutscene frames match the reference decoder with 0 differing pixels (one matching tick out of 7–9 distinct frames), and so do four room views.
+- Timing: the intro stays in sync over 1200 frames, with transient lag of at most 7 frames.
+- Rebuilding from the captures reproduces `bank_data.bin` byte-for-byte.
+- Game logic: the first 504 frames (~17 s) of the level-1 demo reproduce the
+  original engine's state for all 107 objects, collision, hit detection (melee
+  and gun), messages, inventory and room changes included.
+- Level object tables: L1 107 objects / 26 active / checksum 0xBB1D, L3 176 / 43
+  / 0xA0BB, L5 109 / 43 / 0xFFF4 - all three identical to the original engine.
+- The object-script walks are bounded: unreadable level data (an emulator that
+  cannot reach the bank) can no longer spin the frame forever.
+- Picking up an item works: the item moves into Conrad's inventory and the
+  frame keeps running.  It used to hang, because an object whose room was set
+  directly by a script could end up in two room lists at once and the walk
+  round that cycle never ended; each object now records which list it is on.
+- Simulated gameplay runs in the emulator and responds to the controller:
+  holding a direction moves Conrad and the renderer draws him (asserted in
+  `make check`).
 
-The build is reproducible: `make clean && make -j4` produces the same image
-every time (md5 `d56925c19da83696a1f27aef8b6d05b6`, SEGA checksum 0x1b30, 4 MB
-size nibble). That exact image is what the test results below were produced on.
+## Not verified / known gaps
+- PAL (50 Hz): the cutscene path adjusts, but the replay runs 30 Hz ticks off a
+  2-frame divider, so it would play ~20% slow on a PAL console.  Untested.
+- The collision-grid overlay holds 24 modified spans (the engine has no such
+  limit); a level that modifies more would diverge.
+- Collision slots cap at 160 (the engine allows 255); level 1 stays under it,
+  but a busier room could overflow and diverge.
+- The live object table caps at 180 entries (level 3 needs 176); the full logic
+  port will need a tighter RAM layout than 22 bytes per object.
+- The inventory overlay (one frame in 1954) is drawn by the engine as 256
+  full-screen blocks and exceeds the 64-sprite limit; it needs background
+  rendering instead.
+- `tools/smstest` is a local copy of the skill's emulator with two fixes needed
+  for sprite work: the 8-sprites-per-line limit and the background priority bit.
+- Real hardware and 4 MB-aware emulators such as Emulicious haven't been tried; only the headless `smstest` has.
+- Level 1 rooms need up to 416 tiles, so similar tiles get merged. Worst case is 6.1% pixel error (room 52).
 
-`make` does three things:
-
-1. compiles the game code into the fixed first 32 KiB (`banks 0–1`) and the
-   level-1 data into banks 2–43 (one SDCC `CONST` segment per bank),
-2. `ihx2sms` builds `flashback_base.sms` (704 KB),
-3. `tools/mkrom_merged.py` appends the FMV stream (banks 44–96), the title and
-   instruction screens (banks 97–98), pads to exactly 4 MiB and writes the SEGA
-   checksum + the 4 MB size nibble.
-
-Test it headlessly:
-
-```sh
-$HOME/.devkitsms/bin/smstest flashback.sms tests/playtest.txt   # 15 scenarios
-$HOME/.devkitsms/bin/smstest flashback.sms tests/soak.txt       # videos to completion
-
-# does the *ROM* really show every FMV position? (~5 min; one capture per
-# position, taken only after the player finished uploading that position)
-python3 tools/verify_rom_video.py --rom sms/flashback.sms \
-        --noi sms/flashback_base.noi --frames /tmp/frames --work /tmp/rv \
-        #   logos 153/153 · intro1 260/260 · intro2 380/380 · holocube 35/35
-        #   debut 50/50 · objet 35/35 · desinteg 19/19  -> ALL PASSED
-```
-
-Open `flashback.sms` in Emulicious, BlastEm, MEKA, Kega Fusion, or flash it to
-hardware / an Everdrive. (A 4 MB image needs an emulator that honours the full
-256-bank Sega mapper — old 1 MB-only emulators will show the game but not the
-later cutscenes.)
-
----
-
-## 3. Bank map
-
-```
-bank   0 ..  1   game code (fixed window, linked normally)
-bank   2 .. 43   level 1 data        (gen/bank*.c, one CONST segment per bank)
-bank  44 .. 96   FMV stream          (53 banks, 848 KB, shared tile dictionary)
-bank  97         title screen        (palette + tiles + tilemap)
-bank  98         instructions screen
-bank  99 .. 255  free (~2.4 MB spare)
-```
-
----
-
-## 4. The FMV re-encode (shared tile dictionary)
-
-The video build gave every cutscene its own private tile set inside its own
-banks. The merged encoder (`tools/encode_shared_dictionary.py`) instead builds
-**one dictionary for all 932 frames** and then streams per-cutscene deltas
-against it:
-
-```
-tools/extract_video_frames.py      the old banks -> 932 raw 256x96 index frames
-tools/encode_shared_dictionary.py  frames -> ONE dictionary + deltas + snapshots
-tools/verify_shared_dictionary.py  replays the *emitted* bytes and diffs against
-                                   the source frames
-```
-
-Numbers for the shipped stream:
-
-* shared dictionary: **20 202 tiles ≈ 631 KB** across all seven cutscenes (the
-  cutscenes share a lot of imagery — the intro shots, the Holocube console and
-  the starfields all dedupe against each other), compared with 7 private
-  dictionaries gathering **the same total** in the original video build. The
-  saving is what pays for the encode being loss-less:
-* stream: 53 banks = **848 KB**, decoded by 512 tiles per bank
-  (`bank = 44 + (tile_id >> 9)`, `addr = 0x8000 + ((tile_id & 511) << 5)`),
-* **932 positions, byte-exact: 0.0000 % pixel error** — `--verify` replays the
-  emitted banks and diffs them against the source frames; the shared dictionary
-  plus the player's per-VBlank quota make a loss-less encode unnecessary to
-  compromise (the encoder's optional `--thresh`/`--maxupd` knobs stay off),
-* every position carries its **own delta**, including the periodic snapshot
-  positions: the player advances one position per displayed frame and cannot
-  afford a 12 KB full repaint mid-cutscene, so the delta chain is
-  self-sufficient and the snapshots (every 8 positions) are only resync data —
-  `--verify` checks that the two agree (0 cells apart on all seven cutscenes),
-* mean changed 8×8 cells per position 16–159 (52.7 overall, max 360),
-  deltas 39–746 bytes.
-
-**Runtime player** (`sms/src/video_player.c`) keeps the SMS VBlank budget honest:
-the 256×96 window is 384 cells that own VRAM tiles 64–447, the tilemap is written
-once, and a delta is applied **resumably** with a quota of **32 paced tile
-uploads per VBlank** (≈52 % of an NTSC frame — safe with the display on). Heavy
-positions therefore spread over a few frames; the player subtracts those frames
-from the cutscene's hold time so the running time matches the original demo
-(`frame_delay` 1–4 ticks per position). Snapshot 0 paints the opening frame with
-the display off; the later snapshots are resync data only — the delta chain is
-what playback follows, so every position on screen is the encoder's picture.
-
----
-
-## 5. Verification (what was actually checked)
-
-* `ihx2sms` → SEGA header checksum updated; `mkrom_merged.py` → 4 MB size nibble.
-* `smstest` boots the real ROM: display on, 16 colours on the title screen, an
-  FMV running from frame 1.
-* `tests/playtest.txt` — 13 scenarios, all passing: logo → title menu →
-  instructions → holocube video → cinematic intro (both parts) → START GAME →
-  debut video → jungle; walking, jumping, a room transition 27→28; picking up the
-  room-28 object → **object-recovery video plays** → play resumes; the holocube
-  in room 26 → **holocube-message video**; reaching room 63 → disintegration
-  video → back to the title; start a fresh game afterwards.
-* `tests/soak.txt` — every long cutscene is played to completion **without any
-  input** (logo, intro 1, intro 2, holocube, debut) and the display is intact
-  afterwards: no stalls, no corruption, no runaway.
-* Pixel comparison against the ideal frames: the merged ROM renders the
-  cutscenes pixel-identically to the source data, in window coordinates
-  (verified for the logo and jungle-debut sequences, tick by tick).
-* Frame pacing measured on hardware-accurate terms: each position is held for at
-  least `frame_delay` VBlanks, deltas are capped at 32 tile uploads per frame.
-
-Screenshots from the automated runs are in `docs/screenshots/` and `shots/`.
-
----
-
-## 6. Layout
-
-```
-Flashback_SMS.sms              the cartridge image (copy of sms/flashback.sms)
-sms/
-  Makefile                     banked build + playtest target
-  src/main.c                   game states, level-1 engine, item -> cutscene logic
-  src/video_player.c/.h        resumable FMV player (quota-budgeted deltas)
-  src/title_menu.c / instructions.c / audio.c / menu_font.h
-  src/game_banks.h             ROM bank map
-  gen/                         generated data: rooms, sprites, icons, cutscene tables
-  tests/playtest.txt, soak.txt acceptance + soak scripts (smstest DSL)
-tools/
-  extract_video_frames.py      old FMV banks -> raw frames
-  encode_shared_dictionary.py  frames -> shared dictionary + stream + C tables
-                               (--verify replays the emitted bytes: 0.0000 % error)
-  verify_shared_dictionary.py  older standalone verifier (kept for reference)
-  verify_rom_video.py          drives the real ROM in smstest and compares every
-                               FMV position with the source frame (932/932)
-  deflicker.py                 optional: collapse the demo's 1-frame dither strobe
-  emit_icons.py, fbextract.py  DOS GLOBAL.ICN -> SMS icon bank
-  mkrom_merged.py              4 MiB cartridge builder (header fix-up)
-inputs/
-  level1_port/                 the level-1 source archive + DOS demo data
-  video_port/                  the video source archive + its data banks
-docs/screenshots/              captures of the finished build
-```
-
-### Regenerating the FMV data from scratch
-
-```sh
-python3 tools/extract_video_frames.py inputs/video_port/all_data_banks.bin \
-        inputs/video_port/src/cutscenes_data.c /tmp/frames
-python3 tools/encode_shared_dictionary.py --frames-dir /tmp/frames \
-        --out sms/gen --base-bank 44 --snapivl 8 --verify      # 0.0000 % error
-python3 tools/emit_icons.py inputs/level1_port/assets/DATA/DEMO_UK.ABA sms/gen/bank43.c
-make                      # relink code + rebuild the 4 MB image
-```
-
----
-
-## 7. Honest limitations
-
-* The FMV is 256×96 in a 16-colour palette, letterboxed — that is what fits the
-  SMS tile budget at 60 Hz; the playfield during gameplay is the level-1 port's
-  256×192 screen.
-* Cutscenes have no audio track (the source streams carry none).
-* The DOS demo fakes shading with a 1-frame dither alternation; replayed at
-  60 Hz it reads as a soft shimmer on a few shots. `tools/deflicker.py` is a
-  ready-to-use pass that merges those alternations into the average palette
-  colour if you prefer a stable, slightly flatter look (the shipped stream is
-  the bit-exact original data).
-* Level 1 is the *demo's* level 1 (38 rooms) — the retail game's level 1 is
-  longer; the extra content is not in the demo data.
-* The skill's note about `sdcccall(1)` vs. the pre-built `SMSlib.lib` applies:
-  ASlink prints "conflicting sdcc options" warnings during the link. They are
-  harmless (the libraries are the pinned devkitSMS set), which is why the
-  Makefile ignores the linker's exit status and then verifies the `.ihx` exists.
-
-*Flashback is a trademark of its respective owners; this is a non-commercial
-technical port of the freely distributed DOS demo, built with SDCC + devkitSMS.*
+## Next milestones
+1. Chase the behavioural difference at frame 504, then keep going in first-use
+   order.
+2. Speed up the simulated frame: it currently runs at about a third of 30 Hz
+   because the renderer re-reads each object's data through bank switches.  Expect this to be the largest single piece of work in the project.
+2. Load level tables when a level starts instead of all three at boot: the scan
+   currently costs about two seconds of boot time.
+3. Draw level objects into the background layer to relieve the 8-per-line limit.
+4. PSG music and sound effects.

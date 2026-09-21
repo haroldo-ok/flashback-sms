@@ -1,0 +1,325 @@
+
+/*
+ * REminiscence - Flashback interpreter
+ * Copyright (C) 2005-2019 Gregory Montoir (cyx@users.sourceforge.net)
+ */
+
+#ifndef INTERN_H__
+#define INTERN_H__
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <assert.h>
+#include <stdint.h>
+
+#undef ARRAYSIZE
+#define ARRAYSIZE(a) (int)(sizeof(a)/sizeof(a[0]))
+
+inline uint16_t READ_BE_UINT16(const void *ptr) {
+	const uint8_t *b = (const uint8_t *)ptr;
+	return (b[0] << 8) | b[1];
+}
+
+inline uint32_t READ_BE_UINT32(const void *ptr) {
+	const uint8_t *b = (const uint8_t *)ptr;
+	return (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
+}
+
+inline uint16_t READ_LE_UINT16(const void *ptr) {
+	const uint8_t *b = (const uint8_t *)ptr;
+	return (b[1] << 8) | b[0];
+}
+
+inline uint32_t READ_LE_UINT32(const void *ptr) {
+	const uint8_t *b = (const uint8_t *)ptr;
+	return (b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0];
+}
+
+inline int16_t ADDC_S16(int a, int b) {
+	a += b;
+	if (a <= -32768) {
+		return -32768;
+	} else if (a >= 32767) {
+		return 32767;
+	}
+	return a;
+}
+
+inline int16_t S8_to_S16(int8_t a) {
+	return ((uint8_t)a) * 0x101;
+}
+
+template<typename T>
+inline void SWAP(T &a, T &b) {
+	T tmp = a;
+	a = b;
+	b = tmp;
+}
+
+template<typename T>
+inline T CLIP(const T& val, const T& a, const T& b) {
+	if (val <= a) {
+		return a;
+	} else if (val >= b) {
+		return b;
+	}
+	return val;
+}
+
+#undef MIN
+template<typename T>
+inline T MIN(T v1, T v2) {
+	return (v1 < v2) ? v1 : v2;
+}
+
+#undef MAX
+template<typename T>
+inline T MAX(T v1, T v2) {
+	return (v1 > v2) ? v1 : v2;
+}
+
+#undef ABS
+template<typename T>
+inline T ABS(T t) {
+	return (t < 0) ? -t : t;
+}
+
+enum Language {
+	LANG_FR,
+	LANG_EN,
+	LANG_DE,
+	LANG_SP,
+	LANG_IT,
+	LANG_JP,
+};
+
+enum ResourceType {
+	kResourceTypeAmiga,
+	kResourceTypeDOS,
+	kResourceTypeMac,
+	kResourceTypePC98,
+	kResourceTypeSega,
+};
+
+enum Skill {
+	kSkillEasy = 0,
+	kSkillNormal,
+	kSkillExpert,
+};
+
+enum WidescreenMode {
+	kWidescreenNone,
+	kWidescreenAdjacentRooms,
+	kWidescreenMirrorRoom,
+	kWidescreenBlur,
+	kWidescreenCDi,
+};
+
+enum {
+	kWidescreenBorderCDiW = 52,
+	kWidescreenBorderCDiH = 224
+};
+
+struct Options {
+	bool bypass_protection;
+	bool enable_password_menu;
+	bool enable_language_selection;
+	bool fade_out_palette;
+	bool use_tile_data;
+	bool use_text_cutscenes;
+	bool use_seq_cutscenes;
+	bool use_words_protection;
+	bool use_white_tshirt;
+	bool use_prf_music;
+	bool play_asc_cutscene;
+	bool play_caillou_cutscene;
+	bool play_metro_cutscene;
+	bool play_serrure_cutscene;
+	bool play_carte_cutscene;
+	bool play_gamesaved_sound;
+	bool restore_memo_cutscene;
+	bool order_inventory_original;
+	bool fix_fmopl_e0_reg;
+};
+
+struct Features {
+	bool has_extended_intro;
+	bool has_bigendian_data;
+	int resolution_scale;
+	bool has_copy_protection;
+};
+
+struct Color {
+	uint8_t r;
+	uint8_t g;
+	uint8_t b;
+};
+
+struct Point {
+	int16_t x;
+	int16_t y;
+};
+
+struct Demo {
+	const char *name;
+	uint8_t level;
+	uint8_t room;
+	uint8_t x, y;
+};
+
+struct DemoMac {
+	uint8_t level;
+	uint8_t room;
+	uint8_t x, y;
+	uint8_t rnd;
+};
+
+struct Level {
+	const char *name;
+	const char *name2;
+	const char *nameAmiga;
+	uint8_t cutscene_id;
+	uint8_t sound;
+	uint8_t track;
+};
+
+enum ObjectType {
+	kObjectTypeConrad       = 1,  // player character
+	kObjectTypeCollectible  = 3,  // inventory / pickup item
+	kObjectTypeMonster      = 10, // enemy
+	kObjectTypeRenderAbove  = 11, // rendered with priority (above others)
+	kObjectTypeDestructible = 12, // can be hit by gun (like a breakable object)
+};
+
+struct InitPGE {
+	uint16_t type;
+	int16_t pos_x;
+	int16_t pos_y;
+	uint16_t obj_node_number;
+	uint16_t life;
+	int16_t data[4];
+	uint8_t object_type;
+	uint8_t init_room;
+	uint8_t room_location;
+	uint8_t init_flags;
+	uint8_t colliding_icon_num;
+	uint8_t icon_num;
+	uint8_t object_id;
+	uint8_t skill;
+	uint8_t mirror_x;
+	uint8_t flags; // 1:xflip 4:active
+	uint8_t collision_data_len;
+	uint16_t text_num;
+};
+
+struct LivePGE {
+	uint16_t obj_type;
+	int16_t pos_x;
+	int16_t pos_y;
+	uint8_t anim_seq;
+	uint8_t room_location;
+	int16_t life;
+	int16_t counter_value;
+	uint8_t collision_slot;
+	uint8_t next_inventory_PGE;
+	uint8_t current_inventory_PGE;
+	uint8_t ref_inventory_PGE;
+	uint16_t anim_number;
+	uint8_t flags;
+	uint8_t index;
+	uint16_t first_obj_number;
+	LivePGE *next_PGE_in_room;
+	const InitPGE *init_PGE;
+};
+
+struct MessagePGE {
+	MessagePGE *next_entry;
+	uint16_t src_pge;
+	uint16_t msg_num;
+};
+
+struct Object {
+	uint16_t type;
+	int8_t dx;
+	int8_t dy;
+	uint16_t init_obj_type;
+	uint8_t opcode2;
+	uint8_t opcode1;
+	uint8_t flags;
+	uint8_t opcode3;
+	uint16_t init_obj_number;
+	int16_t opcode_arg1;
+	int16_t opcode_arg2;
+	int16_t opcode_arg3;
+};
+
+struct ObjectNode {
+	uint16_t num_objects;
+	Object *objects;
+};
+
+struct ObjectOpcodeArgs {
+	LivePGE *pge; // arg0
+	int16_t a; // arg2
+	int16_t b; // arg4
+};
+
+struct AnimBufferState {
+	int16_t x, y;
+	uint8_t w, h;
+	const uint8_t *dataPtr;
+	LivePGE *pge;
+};
+
+struct AnimBuffers {
+	AnimBufferState *_states[4];
+	uint8_t _curPos[4];
+
+	void addState(uint8_t stateNum, int16_t x, int16_t y, const uint8_t *dataPtr, LivePGE *pge, uint8_t w = 0, uint8_t h = 0);
+};
+
+struct CollisionSlot {
+	int16_t ct_pos;
+	CollisionSlot *prev_slot;
+	LivePGE *live_pge;
+	uint16_t index;
+};
+
+struct BankSlot {
+	uint16_t entryNum;
+	uint8_t *ptr;
+};
+
+struct CollisionSlot2 {
+	CollisionSlot2 *next_slot;
+	int8_t *collision_grid_ptr;
+	uint8_t data_size;
+	uint8_t data_buf[0x10]; // <= InitPGE.collision_data_len
+};
+
+struct InventoryItem {
+	uint8_t icon_num;
+	const InitPGE *init_pge;
+	LivePGE *live_pge;
+};
+
+struct SoundFx {
+	uint32_t offset;
+	uint16_t len;
+	uint16_t freq;
+	uint8_t *data;
+	int8_t peak;
+};
+
+struct ResourceArchive {
+	virtual ~ResourceArchive() {};
+	virtual bool hasEntry(const char *name) const = 0;
+	virtual uint8_t *loadEntry(const char *name, uint32_t *size = 0) = 0;
+};
+
+extern const Features *g_features;
+extern Options g_options;
+extern const char *g_caption;
+
+#endif // INTERN_H__
