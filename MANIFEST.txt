@@ -1,0 +1,81 @@
+Flashback: The Quest for Identity -- Sega Master System, merged 4 MB build
+=======================================================================
+
+This archive contains the complete SOURCES of the merged port: the game code,
+the level-1 data banks, the FMV re-encoder and its generated stream tables, the
+test suites, the build/tooling scripts and the input assets those tools read.
+
+The built ROM is shipped separately as Flashback_SMS.sms (4 MiB,
+md5 d56925c19da83696a1f27aef8b6d05b6, SEGA checksum 0x1b30).
+
+
+Build (SDCC toolchain)
+----------------------
+    cd sms
+    PATH=$HOME/.devkitsms/bin:$PATH make -j4          # -> flashback.sms (4 MiB)
+    PATH=$HOME/.devkitsms/bin:$PATH make playtest     # 15 scenarios
+    PATH=$HOME/.devkitsms/bin:$PATH make soak         # cutscenes to completion
+
+A clean build is byte-reproducible: `make clean && make -j4` must produce
+md5 d56925c19da83696a1f27aef8b6d05b6.  Toolchain: install with the
+sega-master-system-skill-for-claude `setup_toolchain.sh` (SDCC >= 4.2,
+devkitSMS with SMSlib/PSGlib/crt0 + ihx2sms + the smstest emulator in
+~/.devkitsms).
+
+End-to-end FMV verification (needs the extracted source frames, below):
+
+    python3 tools/verify_rom_video.py --rom sms/flashback.sms \
+            --noi sms/flashback_base.noi --frames /tmp/frames --work /tmp/rv
+    # 932/932 positions of the 7 cutscenes pixel-exact vs the source frames
+
+
+Regenerating the derived data
+-----------------------------
+FMV frames (from the video port's original banks):
+    python3 tools/extract_video_frames.py inputs/video_port/all_data_banks.bin \
+            inputs/video_port/src/cutscenes_data.c /tmp/frames
+FMV stream (shared tile dictionary + per-position deltas + snapshot resync):
+    python3 tools/encode_shared_dictionary.py --frames-dir /tmp/frames \
+            --out sms/gen --base-bank 44 --snapivl 8 --verify
+    # --verify replays the emitted banks: 0.0000 % pixel error, delta chain and
+    # snapshots agree on every cutscene
+Item icons:
+    python3 tools/emit_icons.py inputs/level1_port/assets/DATA/DEMO_UK.ABA \
+            sms/gen/bank43.c
+
+
+Contents
+--------
+    README.md                  what the port does, bank map, encoder details
+    sms/Makefile               banked build (code banks 0-1, data 2-43, FMV 44-96)
+    sms/src/*.c,*.h            game code: main, FMV player, title/menu,
+                               instructions, audio, bank map
+    sms/gen/*.c,*.h            level-1 data banks 2-43, room/item/frame tables,
+                               icon bank, cutscene tables, video_bank_data.bin
+    sms/tests/playtest.txt     15-scenario acceptance suite (smstest DSL)
+    sms/tests/soak.txt         long-run suite: every cutscene to completion
+    tools/                     encoders, extractors, verifiers, ROM builder
+    inputs/level1_port/        level-1 port archive: DOS demo item icons,
+                               its main.c/Makefile/tests/tools (reference)
+    inputs/video_port/         video port archive: original data banks, generated
+                               cutscene tables, generators (reference)
+    docs/screenshots/          screenshots of the shipped ROM (emulator captures)
+
+
+Not included (all regenerable, see above)
+-----------------------------------------
+    * built ROMs (flashback.sms, flashback_base.sms) and the delivery copy
+    * SDCC build intermediates (*.rel, *.asm, *.lst, *.sym, *.ihx, *.map,
+      *.noi, *.lk) -- including the ~9.5 MB of leftovers that the original
+      level-1 port archive shipped inside inputs/level1_port/sms/
+    * shots/*.ppm test captures (the suites recreate them; `make playtest`
+      creates the directory)
+
+
+Verified state of this tree
+---------------------------
+    * make clean && make -j4  -> 4 MiB ROM, checksum 0x1b30,
+      md5 d56925c19da83696a1f27aef8b6d05b6 (identical on repeated clean builds)
+    * make playtest / make soak -> ALL PASSED
+    * tools/verify_rom_video.py -> 932/932 FMV positions pixel-exact
+    * tools/encode_shared_dictionary.py --verify -> 0.0000 % pixel error

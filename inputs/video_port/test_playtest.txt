@@ -1,0 +1,146 @@
+symbols flashback_base.noi
+
+echo [1] Boot & Delphine FMV streaming
+run 30
+expectvdp display 1
+expect cur_mode == 1 w1
+screenshot shots/01_logos_fmv.ppm
+
+echo [2] Skip Logo -> Title Screen Menu
+hold 1
+run 20
+hold none
+run 30
+expect cur_mode == 3 w1
+expectvdp display 1
+expectcolors 8
+screenshot shots/02_title_screen.ppm
+
+echo [3] Navigate Title Menu to Instructions
+hold down
+run 15
+hold none
+run 15
+hold down
+run 15
+hold none
+run 15
+hold down
+run 15
+hold none
+run 15
+screenshot shots/03_menu_nav.ppm
+
+echo [4] Open Story & Controls Instructions Screen
+tap 1
+run 30
+expect cur_mode == 6 w1
+expectvdp display 1
+expectcolors 8
+screenshot shots/04_instructions.ppm
+
+echo [5] Return to Title Menu
+tap 1
+run 30
+expect cur_mode == 3 w1
+screenshot shots/05_title_return.ppm
+
+echo [6] Select Option 2: Full Cinematic Intro Cutscenes
+hold down
+run 15
+hold none
+run 15
+tap 1
+run 60
+expect cur_mode == 2 w1
+expectvdp display 1
+expectcolors 3
+screenshot shots/06_intro_cutscene.ppm
+
+echo [7] Skip Intro -> Return to Title Menu & Select Start Game
+hold 1
+run 30
+hold none
+run 30
+expect cur_mode == 3 w1
+tap 1
+run 30
+expect cur_mode == 4 w1
+expectvdp display 1
+expectcolors 4
+screenshot shots/07_debut_cutscene.ppm
+
+echo [8] Enter Titan Jungle Gameplay (Room 26)
+hold 1
+run 30
+hold none
+run 60
+expect cur_mode == 4 w1
+expect cur_room == 26 w1
+expect conrad_health == 4 w1
+expect conrad_y == 112 w1
+expectvdp display 1
+expectcolors 8
+screenshot shots/08_jungle_room26.ppm
+
+echo [9] Conrad Walk Right
+hold right
+run 30
+hold none
+run 15
+expect g_conrad > 50 w2
+screenshot shots/09_conrad_walking.ppm
+
+echo [10] Draw Weapon, Shoot Laser Blaster, Holster
+tap 2
+run 20
+expect 0xC308 == 6 w1
+tap 1
+run 20
+expect 0xC308 == 6 w1
+tap 2
+run 20
+expect 0xC308 == 0 w1
+screenshot shots/10_laser_blaster.ppm
+
+echo [11] Room Transition: Walk to Room 27
+poke g_conrad 240 w2
+hold right
+run 15
+hold none
+run 15
+expect cur_room == 27 w1
+expectvdp display 1
+screenshot shots/11_jungle_room27.ppm
+
+echo [12] Room Transition: Walk to Room 28 (Laser Gate)
+poke g_conrad 240 w2
+hold right
+run 15
+hold none
+run 15
+expect cur_room == 28 w1
+expectvdp display 1
+screenshot shots/12_jungle_room28.ppm
+
+echo [13] Room Transition: Walk Back to Room 26
+poke g_conrad 10 w2
+hold left
+run 15
+hold none
+run 15
+poke g_conrad 10 w2
+hold left
+run 15
+hold none
+run 15
+expect cur_room == 26 w1
+expectvdp display 1
+screenshot shots/13_jungle_room26_return.ppm
+
+echo [14] Holocube Pickup & Cutscene Trigger
+poke g_conrad 155 w2
+run 30
+expect conrad_health == 4 w1
+screenshot shots/14_holocube_scene.ppm
+

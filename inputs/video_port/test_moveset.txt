@@ -1,0 +1,96 @@
+echo [01] Boot and Skip to Title
+hold 1
+run 30
+hold none
+run 30
+
+echo [02] Select Start Game and Skip Debut Cutscene to Room 26
+tap 1
+run 30
+hold 1
+run 30
+hold none
+run 60
+screenshot shots/moveset_01_idle_right.ppm
+
+echo [03] Turn Left
+tap left
+run 8
+screenshot shots/moveset_02_turn_left.ppm
+
+echo [04] Walk Left
+hold left
+run 20
+hold none
+run 5
+screenshot shots/moveset_03_walk_left.ppm
+
+echo [05] Turn Right and Walk Right
+tap right
+run 8
+hold right
+run 20
+hold none
+run 5
+screenshot shots/moveset_04_walk_right.ppm
+
+echo [06] Run Sprint Right and Skid Stop
+hold right
+hold 1
+run 30
+hold none
+run 6
+screenshot shots/moveset_05_run_sprint_right.ppm
+
+echo [07] Crouch Down Low
+hold down
+run 15
+screenshot shots/moveset_06_crouch_low.ppm
+
+echo [08] Combat Somersault Roll
+tap right
+run 12
+screenshot shots/moveset_07_somersault_roll.ppm
+hold none
+run 10
+
+echo [09] Vertical Jump Up
+tap up
+run 8
+screenshot shots/moveset_08_jump_up.ppm
+run 20
+
+echo [10] Running Leap Jump Forward
+hold right
+hold 1
+run 15
+tap up
+run 10
+screenshot shots/moveset_09_running_leap.ppm
+hold none
+run 25
+
+echo [11] Draw Weapon to Armed Stance
+tap 2
+run 20
+screenshot shots/moveset_10_armed_stance.ppm
+
+echo [12] Fire Blaster Laser Bolt
+tap 1
+run 4
+screenshot shots/moveset_11_fire_blaster.ppm
+run 20
+
+echo [13] Holster Blaster Weapon
+tap 2
+run 25
+screenshot shots/moveset_12_holstered_idle.ppm
+
+echo [14] Floor Item Pickup
+hold down
+run 10
+tap 1
+run 12
+screenshot shots/moveset_13_pickup_item.ppm
+hold none
+run 20

@@ -1,0 +1,37 @@
+symbols flashback_base.noi
+
+echo [1] Boot and Skip to Title
+run 30
+hold 1
+run 20
+hold none
+run 30
+expect cur_mode == 3 w1
+
+echo [2] Start Game and Skip Debut Cutscene to Room 26
+tap 1
+run 30
+expect cur_mode == 4 w1
+hold 1
+run 30
+hold none
+run 60
+expect cur_room == 26 w1
+expect conrad_y == 112 w1
+screenshot shots/pickup_01_spawn_room26.ppm
+
+echo [3] Walk Right towards Holocube at x=160
+hold right
+run 75
+hold none
+run 15
+screenshot shots/pickup_02_near_holocube.ppm
+
+echo [4] Floor Pickup Action
+tap 1
+run 12
+screenshot shots/pickup_03_bending_down.ppm
+run 30
+
+echo [5] Verify Cutscene Triggered from Holocube Pickup
+screenshot shots/pickup_04_holocube_cutscene.ppm

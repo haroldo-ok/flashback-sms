@@ -1,0 +1,90 @@
+symbols flashback_base.noi
+echo [soak] the logo FMV plays to completion on its own
+waituntil cur_mode == 3 1500 w1
+expectvdp display 1
+expectcolors 8
+screenshot ../shots/soak_01_title.ppm
+
+echo [soak] full cinematic intro: part 1 then part 2, to completion
+hold down
+run 4
+hold none
+run 4
+tap 1
+run 20
+expect cur_mode == 2 w1
+expect cur_scene == 2 w1
+waituntil cur_scene == 3 3000 w1
+screenshot ../shots/soak_02_intro1_end.ppm
+waituntil cur_mode == 3 5000 w1
+expectvdp display 1
+expectcolors 8
+screenshot ../shots/soak_03_intro2_end.ppm
+
+echo [soak] holocube video to completion
+hold down
+run 4
+hold none
+run 4
+hold down
+run 4
+hold none
+run 4
+tap 1
+run 20
+expect cur_mode == 5 w1
+waituntil cur_mode == 3 1200 w1
+screenshot ../shots/soak_04_holocube_end.ppm
+
+echo [soak] start the game and play the debut video to completion automatically
+tap 1
+run 20
+expect cur_mode == 5 w1
+waituntil cur_mode == 4 1200 w1
+expect cur_room == 27 w1
+expectvdp display 1
+expectcolors 8
+screenshot ../shots/soak_05_jungle.ppm
+
+echo [soak] normal play: run/jump right across room 27 into room 28
+poke warp_room 27 w1
+run 20
+expect cur_room == 27 w1
+hold right+2
+run 60
+hold right+1
+run 20
+hold none
+run 20
+hold right+2
+run 60
+hold right+1
+run 20
+hold none
+run 20
+hold right+2
+run 120
+hold none
+run 20
+expect cur_room == 28 w1
+expect cur_mode == 4 w1
+expectvdp display 1
+expectcolors 8
+screenshot ../shots/soak_06_traverse.ppm
+
+echo [soak] keep playing for another 1500 frames (no crashes, no stalls)
+hold right+2
+run 500
+hold left+2
+run 500
+hold right
+run 300
+hold none
+run 120
+expect cur_mode == 4 w1
+expectvdp display 1
+expectcolors 8
+print cur_room w1
+print px w2
+print py w2
+screenshot ../shots/soak_07_play.ppm

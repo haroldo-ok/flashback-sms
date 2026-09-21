@@ -1,0 +1,23 @@
+symbols /home/user/sms/game.noi
+run 10
+expectvdp display 1
+screenshot /home/user/work/nav_r27.ppm
+hold right+2
+run 26
+hold right+1
+run 30
+hold right+2
+run 60
+print dbg_room w1
+screenshot /home/user/work/nav_r28.ppm
+hold right+2
+run 300
+print dbg_room w1
+screenshot /home/user/work/nav_far.ppm
+hold down
+run 30
+hold left+2
+run 400
+print dbg_room w1
+print dbg_inv w1
+screenshot /home/user/work/nav_back.ppm
