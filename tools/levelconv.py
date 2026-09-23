@@ -75,18 +75,23 @@ def pack_ani(ani):
     return ntypes, bytes(idx), banks
 
 
+MAX_PGE = 255          # the live table on the Z80; 0xFF means "no object"
+
+
 def expected_checksum(lv, skill=1):
     """Sum over the objects the engine actually initialises (skill <= level):
-    must match what the Z80 loader computes."""
+    must match what the Z80 loader computes.  It stops at MAX_PGE objects -
+    level 2 has 256 and its last one is not simulated - so the expectation
+    covers exactly the objects the port loads."""
     s = 0
     n = 0
-    for i in range(lv['npges']):
+    for i in range(min(lv['npges'], MAX_PGE)):
         if lv['skills'][i] <= skill:
             s = (s + lv['live_first'][i] + lv['live_flags'][i]
                  + (lv['live_life'][i] & 0xFFFF) + lv['live_room'][i]
                  + lv['live_anim'][i]) & 0xFFFF
             n += 1
-    active = sum(1 for i in range(lv['npges'])
+    active = sum(1 for i in range(min(lv['npges'], MAX_PGE))
                  if lv['skills'][i] <= skill and (lv['live_flags'][i] & 4))
     return s, n, active
 

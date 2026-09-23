@@ -9,12 +9,13 @@ extern unsigned int  logic_bad_op_frame;
 extern unsigned char logic_running;
 extern unsigned char logic_check;      /* 0 = run on without comparing */
 extern unsigned char logic_cur_room;
+extern unsigned char logic_level;
 extern unsigned char logic_use_pad;    /* play with the controller */
 extern unsigned char logic_pad_mask;
 extern unsigned int  logic_cutscene;   /* 0xFFFF = none pending */
 extern unsigned char room_head[64], next_in_room[];
 extern unsigned int  logic_checksum, logic_expected;
-void logic_start(void);
+void logic_start(unsigned char level_index);   /* index into the packed levels */
 unsigned char logic_object_type(unsigned char idx);
 unsigned char logic_step(void);          /* one 30 Hz game frame */
 #endif

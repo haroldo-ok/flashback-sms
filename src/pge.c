@@ -32,6 +32,7 @@
 
 LivePGE pge_live[MAX_PGE];
 unsigned int  pge_num;
+unsigned int  pge_total;       /* objects in the level data (may exceed MAX_PGE) */
 unsigned int  pge_checksum;
 unsigned int  pge_active;
 unsigned char pge_skill = 1;
@@ -83,7 +84,9 @@ void pge_load_level(unsigned char level_index)
 
     pge_active = 0;
     SMS_mapROMBank(bank_a);
-    pge_num = rd16(A);
+    pge_num = pge_total = rd16(A);
+    /* The table holds MAX_PGE objects, but the node tables sit after ALL of
+     * the level's object records, so offsets must use the true count. */
     if (pge_num > MAX_PGE) pge_num = MAX_PGE;
     room0 = A[2 + I_INIT_ROOM];                 /* engine: _currentRoom = pgeInit[0].init_room */
 
@@ -99,9 +102,6 @@ void pge_load_level(unsigned char level_index)
         live->life = (int)rd16(p + I_LIFE);
         live->counter_value = 0;
         live->collision_slot = 0xFF;
-        live->next_inventory_PGE = 0xFF;
-        live->current_inventory_PGE = 0xFF;
-        live->ref_inventory_PGE = 0xFF;
         live->anim_number = 0;
         live->index = (unsigned char)i;
         live->flags = 0;
@@ -122,7 +122,7 @@ void pge_load_level(unsigned char level_index)
         if (iflags & 2) live->flags |= 0x80;
 
         node = rd16(p + I_NODE);
-        first = rd16(A + 2 + pge_num * INIT_PGE_SIZE + node * 2);
+        first = rd16(A + 2 + pge_total * INIT_PGE_SIZE + node * 2);
         /* the object's entry point is its index within the node's object list */
         /* walk the node's object list for this object's type.  The pointer
          * moves through the bank and only remaps at a bank boundary: doing a

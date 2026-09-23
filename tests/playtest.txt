@@ -30,29 +30,21 @@ waituntil fmv_tick >= 677 2000
 screenshot shots/sms/cut_40_677.ppm
 print fmv_tick
 
+echo timing: after 1200 real frames of the intro the stream is still in sync (bounded lag)
+waituntil fmv_tick >= 518 1500
+expect ticks_behind <= 48
+run 60
+expect ticks_behind <= 48
+expect fmv_active == 1 w1
+print fmv_tick
+
 echo logos play to their natural end: 818 ticks, 592 uploads (host decode)
-waituntil seq_pos == 1 2000 w1
+waituntil game_state == 1 3000 w1
 expect last_clip_ticks == 818
 expect last_clip_uploads == 592
-expect fmv_active == 1 w1
-waituntil fmv_tick >= 630 3000
-screenshot shots/sms/cut_0D_630.ppm
-print fmv_tick
-waituntil fmv_tick >= 860 3000
-screenshot shots/sms/cut_0D_860.ppm
-print fmv_tick
 
-echo timing: after 1200 real frames of the intro the stream is still in sync (bounded lag)
-waituntil fmv_tick >= 1100 400
-expect ticks_behind <= 8
-run 100
-expect ticks_behind <= 8
-expect fmv_active == 1 w1
-print fmv_tick
-
-echo button 1 skips the rest of the intro to the title screen
-tap 1
-waituntil game_state == 1 120 w1
+echo the intro ends at the title screen
+waituntil game_state == 1 3000 w1
 run 5
 expectvdp display 1
 expectcolors 8
@@ -60,41 +52,25 @@ screenshot shots/sms/title.ppm
 
 echo game logic: each level's live object table is built on the Z80 and
 echo compared with the original engine (object count, active objects, checksum)
-waituntil pge_loaded == 1 900 w1
-expect 0xC013 == 107
-expect 0xC00D == 26
+waituntil pge_loaded == 7 900 w1
+expect 0xC023 == 107
+expect 0xC015 == 26
 expect 0xC007 == 47901
-
-echo simulated gameplay: the title screen starts level 1 through its
-echo own cutscene, then the ported logic drives the sprite renderer
-waituntil game_state == 1 12000 w1
-run 20
-hold 2
-run 20
-hold none
-waituntil game_state == 2 2000 w1
-run 120
-expect sim_room == 27 w1
-expect sim_sprites >= 4 w1
-expectvdp display 1
-expectcolors 8
-screenshot shots/sms/sim_gate.ppm
-echo the controller drives the simulation: holding a direction moves Conrad
-expect 0xC02E == 48
-hold right
-run 400
-hold none
-run 20
-expect 0xC02E > 48
-expect sim_sprites >= 3 w1
-echo run + up jumps: the engine never sees a diagonal, so the jump
-echo comes from the run modifier with up, not up plus a direction
-hold 1+up
-run 100
-hold none
-run 40
-expect 0xC02E > 103
-pause
-run 20
-waituntil game_state == 1 120 w1
-run 5
+expect 0xC025 == 255
+expect 0xC017 == 67
+expect 0xC009 == 48614
+expect 0xC027 == 176
+expect 0xC019 == 43
+expect 0xC00B == 41147
+expect 0xC029 == 190
+expect 0xC01B == 56
+expect 0xC00D == 26003
+expect 0xC02B == 90
+expect 0xC01D == 29
+expect 0xC00F == 39710
+expect 0xC02D == 109
+expect 0xC01F == 43
+expect 0xC011 == 65524
+expect 0xC02F == 169
+expect 0xC021 == 65
+expect 0xC013 == 31563

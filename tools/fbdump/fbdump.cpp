@@ -112,10 +112,8 @@ static void defaultOptions() {
 }
 
 static Game *makeGame(SystemStub_Dump *stub, FileSystem *fs) {
-	File f;
-	if (!f.open("DEMO_UK.ABA", "rb", fs)) {
-		error("DEMO_UK.ABA not found - point DATA at the unzipped Flashback DOS demo");
-	}
+	/* either the DOS demo (one DEMO_UK.ABA archive) or the full DOS game
+	 * (loose files: level1.map, level1.pge, ...) - Resource::init tells them apart */
 	g_features = &kFeaturesDOS;
 	Game *g = new Game(stub, fs, ".", 0, kResourceTypeDOS, LANG_EN, kWidescreenNone, false, 0, 0, 0);
 	g->_res.init();
@@ -131,6 +129,23 @@ static Game *makeGame(SystemStub_Dump *stub, FileSystem *fs) {
 }
 
 static void mkdirp(const char *d) { mkdir(d, 0755); }
+
+/* a whole resource file, from the demo's archive or as a loose file */
+static uint8_t *loadWhole(Game *g, FileSystem *fs, const char *name, uint32_t *size) {
+	if (g->_res._aba) return g->_res._aba->loadEntry(name, size);
+	File f;
+	if (!f.open(name, "rb", fs)) return 0;
+	*size = f.size();
+	uint8_t *p = (uint8_t *)malloc(*size);
+	f.read(p, *size);
+	return p;
+}
+
+static bool resourceExists(Game *g, FileSystem *fs, const char *name) {
+	if (g->_res._aba) return g->_res._aba->findEntry(name) != 0;
+	File f;
+	return f.open(name, "rb", fs);
+}
 
 /* ------------------------------------------------------- gameplay trace --
  * .fbt : "FBT1" then per drawn game frame (30 Hz)
@@ -288,7 +303,7 @@ int main(int argc, char *argv[]) {
 			const char *name = Cutscene::_namesTableDOS[cutName];
 			char entry[32];
 			snprintf(entry, sizeof(entry), "%s.CMD", name);
-			if (!g->_res._aba || !g->_res._aba->findEntry(entry)) {
+			if (!resourceExists(g, &fs, entry)) {
 				continue;
 			}
 			char path[512];
@@ -323,12 +338,19 @@ int main(int argc, char *argv[]) {
 			fwrite("FBR1", 1, 4, fp);
 			int count = 0;
 			for (int room = 0; room < 0x40; ++room) {
-				if (!g->_res._lev || READ_BE_UINT32(g->_res._lev + room * 4) == 0) continue;
-				if (!bytekiller_unpack(g->_res._scratchBuffer, Resource::kScratchBufferSize, g->_res._lev,
-				                       READ_BE_UINT32(g->_res._lev + room * 4))) continue;   /* not in demo */
+				if (g->_res._map) {
+					/* full game: rooms are packed bitmaps (.map), 6-byte index */
+					if (READ_LE_UINT32(g->_res._map + room * 6) == 0) continue;
+				} else {
+					/* demo: rooms are built from tiles (.lev) */
+					if (!g->_res._lev || READ_BE_UINT32(g->_res._lev + room * 4) == 0) continue;
+					if (!bytekiller_unpack(g->_res._scratchBuffer, Resource::kScratchBufferSize, g->_res._lev,
+					                       READ_BE_UINT32(g->_res._lev + room * 4))) continue;   /* not in demo */
+				}
 				memset(stub->_pal, 0, sizeof(stub->_pal));
 				memset(g->_vid._frontLayer, 0, g->_vid._layerSize);
-				g->_vid.DOS_decodeLev(lvl, room);
+				if (g->_res._map) g->_vid.DOS_decodeMap(lvl, room);
+				else g->_vid.DOS_decodeLev(lvl, room);
 				fputc('R', fp);
 				fputc(room, fp);
 				fputc(g->_vid._mapPalSlot1, fp);
@@ -446,7 +468,7 @@ int main(int argc, char *argv[]) {
 			char aniName[32];
 			snprintf(aniName, sizeof(aniName), "%s.ANI", Game::_gameLevels[lvl].name2);
 			uint32_t aniSize = 0;
-			uint8_t *ani = g->_res._aba ? g->_res._aba->loadEntry(aniName, &aniSize) : 0;
+			uint8_t *ani = loadWhole(g, &fs, aniName, &aniSize);
 			if (!ani) error("cannot read %s", aniName);
 			fwrite(&aniSize, 4, 1, fp);
 			fwrite(ani, 1, aniSize, fp);
@@ -456,6 +478,109 @@ int main(int argc, char *argv[]) {
 		#undef W16
 		fclose(fp);
 		printf("level %d: %d pges, %d node slots (%d unique), %d objects\n", lvl, numPges, nodes, uniqCount, numObjects);
+	} else if (!strcmp(mode, "sprites")) {
+		/* Every sprite set the game can draw, for all levels, tagged by set:
+		 *   0 = Conrad, 1..4 = monsters (junky, mercenary, replicant, glue),
+		 *   10+L = the level objects of level part L.
+		 * Written as a trace; each frame's room byte carries the set id. */
+		mkdirp(out);
+		char path[512];
+		snprintf(path, sizeof(path), "%s/sprites.fbt", out);
+		g_traceOut = fopen(path, "wb");
+		fwrite("FBT1", 1, 4, g_traceOut);
+		g_dumpStub = stub;
+		g_spriteHook = tracePiece;
+		g_frameHook = 0;
+		int written = 0;
+		for (int lvl = 0; lvl < 7; ++lvl) {
+			g->_demoBin = -1;
+			g->_skillLevel = 1;
+			g->_currentLevel = lvl;
+			g->loadLevelData();
+			g->resetGameState();
+			g->_currentRoom = g->_res._pgeInit[0].init_room;
+			if (g->_res._map) g->_vid.DOS_decodeMap(lvl, g->_currentRoom);
+			else g->_vid.DOS_decodeLev(lvl, g->_currentRoom);
+			LivePGE *pge = &g->_pgeLive[0];
+			/* passes: objects of this level; Conrad (once); each monster set (once) */
+			for (int pass = 0; pass < 6; ++pass) {
+				int set;
+				if (pass == 0) set = 10 + lvl;
+				else if (pass == 1) { if (lvl != 0) continue; set = 0; }
+				else {
+					const int m = pass - 2;                 /* monster set 0..3 */
+					if (lvl != 0) continue;
+					g->_curMonsterNum = m;
+					g->_res.load(Game::_monsterNames[0][m], Resource::OT_SPRM);
+					g->_res.load_SPR_OFF(Game::_monsterNames[0][m], g->_res._sprm);
+					g->_vid.setPaletteSlotLE(Video::PALETTE_INDEX_MONSTER, Game::_monsterPals[m]);
+					set = 1 + m;
+				}
+				for (int mirror = 0; mirror < 2; ++mirror) {
+					const int lo = (set >= 1 && set <= 4) ? 0x22F : 0;
+					/* objects: only the level's real sprite list (_numSpc) */
+					const int hi = (set >= 1 && set <= 4) ? 0x28E : (set >= 10 ? g->_res._numSpc : Resource::NUM_SPRITES);
+					for (int n = lo; n < hi; ++n) {
+						if (set == 0 && n >= 0x22F && n < 0x28E) continue;   /* monster range */
+						if (set < 10 && g->_res._sprData[n] == 0) continue;
+						g->_animBuffers._curPos[0] = 0xFF;
+						g->_animBuffers._curPos[1] = 0xFF;
+						g->_animBuffers._curPos[2] = 0xFF;
+						g->_animBuffers._curPos[3] = 0xFF;
+						g_pieceCount = 0;
+						pge->anim_number = n;
+						pge->flags = (uint8_t)((mirror ? 2 : 0) | (set >= 10 ? 8 : 0));
+						pge->pos_x = 128;
+						pge->pos_y = 100;
+						pge->room_location = g->_currentRoom;
+						g->prepareAnimsHelper(pge, 0, 0);
+						g->drawAnims();
+						if (g_pieceCount > 0) {
+							const int keepRoom = g->_currentRoom;
+							g->_currentRoom = set;             /* carries the set id */
+							traceFrame(g);
+							g->_currentRoom = keepRoom;
+							++written;
+						}
+						g_pieceCount = 0;
+					}
+				}
+			}
+			printf("level part %d done (%d sprite frames so far)\n", lvl, written);
+		}
+		g_spriteHook = 0;
+		fclose(g_traceOut);
+		g_traceOut = 0;
+	} else if (!strcmp(mode, "menutext")) {
+		/* The title screen's text is part of its picture, so the level select
+		 * needs its own: five strips reading LEVEL 1..5, drawn with the game's
+		 * own menu font, captured as one image for the converter to cut up. */
+		mkdirp(out);
+		g->_res.load("FB_TXT", Resource::OT_FNT);     /* the menu font */
+		g->_vid.setTextPalette();
+		memset(g->_vid._frontLayer, 0, g->_vid._layerSize);
+		g->_menu._charVar1 = 0;        /* shadow / background */
+		g->_menu._charVar2 = 0xE2;
+		g->_menu._charVar3 = 0xE5;     /* bright text */
+		g->_menu._charVar4 = 0xE2;
+		for (int n = 0; n < 5; ++n) {
+			char line[16];
+			snprintf(line, sizeof(line), "LEVEL %d", n + 1);
+			g->_menu.drawString(line, 2 + n * 2, 2, 2);
+		}
+		stub->copyRect(0, 0, g->_vid._w, g->_vid._h, g->_vid._frontLayer, g->_vid._w);
+		stub->updateScreen(0);
+		char path[512];
+		snprintf(path, sizeof(path), "%s/menutext.fbr", out);
+		FILE *fp = fopen(path, "wb");
+		fwrite("FBR1", 1, 4, fp);
+		fputc('R', fp);
+		fputc(0, fp);
+		fputc(0, fp); fputc(0, fp); fputc(0, fp); fputc(0, fp);
+		fwrite(stub->_pal, 1, 768, fp);
+		fwrite(stub->_fb, 1, 256 * 224, fp);
+		fclose(fp);
+		printf("menu text captured\n");
 	} else if (!strcmp(mode, "title")) {
 		/* One frame of the game's own title screen, captured as a room-shaped
 		 * image so the room converter can turn it into SMS tiles. */

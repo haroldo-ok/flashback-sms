@@ -48,19 +48,63 @@ def pack(a):
             r['level'] = lvl
             rooms.append(r)
     b = Blob()
-    # 3. rooms: packed first-fit, each record kept inside one bank
+    # 3. rooms.  ONE compact tile dictionary for every map (per-map dictionaries
+    # cost four bank-aligned regions each, and tiles barely differ between
+    # maps), then the room records first-fit into whatever bank space is left -
+    # a record is ~2 KB and skipping to a fresh bank each time wasted ~200 KB.
+    # A record is u16 ntiles, palette[16], nametable[32*28*2], then ntiles x u16
+    # dictionary ids: the tile for each of its VRAM slots (448-n .. 447).
+    import tilepack as TP
     room_tab = []
-    placed = {}
+    uniq, index = [], {}
     for r in rooms:
-        key = (r['level'], r.get('alias', r['room']))
-        if key not in placed:
-            rec = bytes([r['ntiles'] & 0xFF, r['ntiles'] >> 8]) + r['palette'] + r['nametable'] + r['tiles']
-            assert len(rec) <= BANK
-            if len(rec) > b.room_left():
-                b.align_bank()
-            placed[key] = (b.bank, b.addr)
-            b.data += rec
-        room_tab.append((r['level'], r['room']) + placed[key])
+        t = r['tiles']
+        for i in range(r['ntiles']):
+            k = t[i * 32:i * 32 + 32]
+            if k not in index:
+                index[k] = len(uniq)
+                uniq.append(k)
+    room_dicts = []
+    if rooms:
+        remap, regions, starts = TP.build([TP.unplanar(k) for k in uniq])
+        banks = []
+        for ty in (0, 1, 2, 3):
+            b.align_bank()
+            banks.append(b.bank)
+            b.data += regions[ty]
+        b.align_bank()
+        room_dicts.append(tuple(banks) + tuple(starts))
+        # first-fit: remember the free tail of every bank the records open
+        free = []          # (bank, start_offset_in_blob, bytes_left)
+        placed = {}
+        for r in rooms:
+            key = (r['level'], r.get('alias', r['room']))
+            if key not in placed:
+                ids = bytearray()
+                t = r['tiles']
+                for i in range(r['ntiles']):
+                    tid = remap[index[t[i * 32:i * 32 + 32]]]
+                    ids += bytes([tid & 0xFF, tid >> 8])
+                rec = bytes([r['ntiles'] & 0xFF, r['ntiles'] >> 8]) + r['palette'] + r['nametable'] + bytes(ids)
+                assert len(rec) <= BANK
+                spot = None
+                for j, (bk, off, left) in enumerate(free):
+                    if left >= len(rec):
+                        spot = j
+                        break
+                if spot is None:
+                    b.align_bank()
+                    bk, off = b.bank, len(b.data)
+                    b.data += bytes(BANK)
+                    free.append((bk, off, BANK))
+                    spot = len(free) - 1
+                bk, off, left = free[spot]
+                at = off + (BANK - left)
+                b.data[at:at + len(rec)] = rec
+                placed[key] = (bk, 0x8000 + (BANK - left))
+                free[spot] = (bk, off, left - len(rec))
+            room_tab.append((r['level'], r['room']) + placed[key] + (0,))
+    b.align_bank()
     # 4. gameplay replay: sprite dictionary (64-byte 8x16 entries) + stream
     spr_bank0 = replay_bank = replay_addr = 0
     if a.sprites:
@@ -148,12 +192,23 @@ def pack(a):
         print(f'animation sprites: {len(an["tiles"])} tiles from bank {anim_tile_bank}, '
               f'table at {anim_tab_bank}, entries at {anim_blob_bank}')
 
-    # LAST: cutscene dictionary: 512 tiles per bank, tile id -> bank BANK0+(id>>9)
-    dict_bank0 = b.bank
-    for k in fmv['dict']:
-        b.data += F_planar(k)
+    print(f'  [pack] before cutscenes: bank {b.bank}')
+    # LAST: cutscene dictionary in the compact lossless form (tools/tilepack.py):
+    # sorted by type, each type region bank-aligned, no per-tile index
+    import tilepack as TP
+    remap, regions, (start1, start2, start3) = TP.build([np.frombuffer(k, np.uint8) for k in fmv['dict']])
+    fmv_banks = []
+    for t in (0, 1, 2, 3):
+        b.align_bank()
+        fmv_banks.append(b.bank)
+        b.data += regions[t]
     b.align_bank()
+    dict_bank0 = fmv_banks[0]
     dict_banks = b.bank - dict_bank0
+    fmv_desc = (fmv_banks[0], fmv_banks[1], fmv_banks[2], fmv_banks[3], start1, start2, start3)
+    # the streams name tiles by their old ids: rewrite the upload ops
+    import dictmerge as DM
+    fmv['clips'] = [(cid, DM.rewrite(st, np.array(remap))) for cid, st in fmv['clips']]
     # and cutscene streams - the bulkiest data, and the only part a game can
     # do without, so it goes above everything gameplay needs: ops never straddle a bank; OP_NEXTBANK jumps to the next
     clips = []
@@ -169,6 +224,88 @@ def pack(a):
         clips.append((cid,) + start)
     b.align_bank()
     stream_end = b.bank
+    print(f'  [pack] after rooms and levels: bank {b.bank}')
+    # 6b. all-levels sprite sets (tools/sprconv.py): one compact 8x8 dictionary,
+    # per set a table of (bank, addr) per (anim, mirror), entries of
+    #   u8 count, count x (u16 top, u16 bottom, i8 dx, i8 dy)
+    spr_desc = (0,) * 7
+    spr_tab = [(0, 0)] * 6
+    spr_lo = [(0, 0)] * 6
+    spr_mon = []
+    spr_max = 0
+    spr_palette = [0] * 16
+    if a.sprsets:
+        import tilepack as TP
+        sp = pickle.load(open(a.sprsets, 'rb'))
+        remap, regions, starts = TP.build(sp['tiles'])
+        banks = []
+        for ty in (0, 1, 2, 3):
+            b.align_bank()
+            banks.append(b.bank)
+            b.data += regions[ty]
+        b.align_bank()
+        spr_desc = tuple(banks) + tuple(starts)
+        spr_max = max(anim for st in sp['sets'].values() for (anim, _m) in st)
+        # entry records first, so the tables can point at them
+        where = {}
+        for slot in sorted(sp['sets']):
+            for key, parts in sorted(sp['sets'][slot].items()):
+                rec = bytes([len(parts)])
+                for top, bot, dx, dy in parts:
+                    t, u = remap[top], remap[bot]
+                    rec += bytes([t & 0xFF, t >> 8, u & 0xFF, u >> 8, dx & 0xFF, dy & 0xFF])
+                if len(rec) > b.room_left():
+                    b.align_bank()
+                where[(slot,) + key] = (b.bank, b.addr)
+                b.data += rec
+        b.align_bank()
+        # each set covers only the animation numbers it actually uses: the
+        # monsters share one 95-entry range, so a table sized to the global
+        # maximum wasted ~30 KB
+        spr_tab = []
+        spr_lo = []
+        for slot in range(6):
+            used = [anim for (sl, anim, _m) in where if sl == slot]
+            lo, hi = (min(used), max(used)) if used else (0, 0)
+            per = (hi - lo + 1) * 2 * 3
+            if per > b.room_left():
+                b.align_bank()
+            spr_tab.append((b.bank, b.addr))
+            spr_lo.append((lo, hi))
+            tab = bytearray()
+            for anim in range(lo, hi + 1):
+                for mirror in (0, 1):
+                    bk, ad = where.get((slot, anim, mirror), (0, 0))
+                    tab += bytes([bk, ad & 0xFF, ad >> 8])
+            b.data += bytes(tab)
+        b.align_bank()
+        for row in sp['monster_of']:
+            if len(row) > b.room_left():
+                b.align_bank()
+            spr_mon.append((b.bank, b.addr))
+            b.data += row
+        b.align_bank()
+        spr_palette = list(sp['palette'])
+        print(f"sprite sets: {len(sp['tiles'])} 8x8 tiles, {len(where)} entries, tables for 6 sets")
+
+    print(f'  [pack] after sprites: bank {b.bank}')
+    # 6c. level-select text (tools/menuconv.py): a few shared tiles, one row of
+    # cell indices per level, and a palette loaded as the sprite palette so the
+    # text keeps its colours over the title picture
+    menu_bank = menu_addr = 0
+    menu_ntiles = menu_cells = 0
+    menu_palette = [0] * 16
+    if a.menu:
+        mn = pickle.load(open(a.menu, 'rb'))
+        blob = b''.join(mn['tiles']) + bytes(c for strip in mn['strips'] for c in strip)
+        if len(blob) > b.room_left():
+            b.align_bank()
+        menu_bank, menu_addr = b.bank, b.addr
+        b.data += blob
+        menu_ntiles, menu_cells = len(mn['tiles']), mn['cells']
+        menu_palette = list(mn['palette'])
+        print(f'level select: {menu_ntiles} tiles + 5 strips at bank {menu_bank}')
+
     # 7. per-frame inputs + expected object state for the logic port
     logic_bank = 0
     if a.logic:
@@ -187,6 +324,14 @@ def pack(a):
         '/* generated by tools/mkdata.py - do not edit */',
         '#ifndef DATA_INDEX_H', '#define DATA_INDEX_H',
         f'#define FMV_DICT_BANK0 {dict_bank0}',
+        '#include "tiledec.h"',
+        'extern const TileDict fmv_dict;',
+        f'#define FMV_DICT_BANK1 {fmv_desc[1] if fmv["dict"] else 0}',
+        f'#define FMV_DICT_BANK2 {fmv_desc[2] if fmv["dict"] else 0}',
+        f'#define FMV_DICT_BANK3 {fmv_desc[3] if fmv["dict"] else 0}',
+        f'#define FMV_DICT_START1 {fmv_desc[4] if fmv["dict"] else 0}',
+        f'#define FMV_DICT_START2 {fmv_desc[5] if fmv["dict"] else 0}',
+        f'#define FMV_DICT_START3 {fmv_desc[6] if fmv["dict"] else 0}',
         f'#define FMV_NUM_CLIPS {len(clips)}',
         f'#define NUM_ROOMS {len(room_tab)}',
         f'#define HAS_TITLE {1 if a.title else 0}',
@@ -201,6 +346,20 @@ def pack(a):
         f'#define ANIM_BLOB_BANK {anim_blob_bank}',
         f'#define ANIM_MAX {anim_max}',
         f'#define HAS_ANIM {1 if a.anim else 0}',
+        f'#define HAS_SPRSETS {1 if a.sprsets else 0}',
+        f'#define HAS_MENU {1 if a.menu else 0}',
+        'extern const unsigned char level_cutscene[];',
+        f'#define MENU_BANK {menu_bank}',
+        f'#define MENU_ADDR 0x{menu_addr:04X}',
+        f'#define MENU_NTILES {menu_ntiles}',
+        f'#define MENU_CELLS {menu_cells}',
+        'extern const unsigned char menu_palette[16];',
+        f'#define SPR_MAX_ANIM {spr_max}',
+        'extern const TileDict spr_dict;',
+        'extern const unsigned char spr_tab_bank[6], spr_mon_bank[];',
+        'extern const unsigned int spr_tab_lo[6], spr_tab_hi[6];',
+        'extern const unsigned int spr_tab_addr[6], spr_mon_addr[];',
+        'extern const unsigned char spr_palette[16];',
         f'#define HAS_LOGIC {1 if a.logic else 0}',
         'extern const unsigned char level_num[], level_bank_a[], level_bank_obj[];',
         'extern const unsigned char level_bank_aniidx[], level_bank_ani[], level_bank_ct[];',
@@ -208,7 +367,9 @@ def pack(a):
         'extern const unsigned int level_npges[];',
         'extern const unsigned char fmv_clip_id[], fmv_clip_bank[];',
         'extern const unsigned int fmv_clip_addr[];',
-        'extern const unsigned char room_level[], room_num[], room_bank[];',
+        'extern const unsigned char room_level[], room_num[], room_bank[], room_dict[];',
+        f'#define NUM_ROOM_DICTS {len(room_dicts)}',
+        'extern const TileDict room_dicts[];',
         'extern const unsigned int room_addr[];',
         '#endif']
     open(f'{a.out}/data_index.h', 'w').write('\n'.join(h) + '\n')
@@ -218,6 +379,8 @@ def pack(a):
     hx = lambda v: f'0x{v:02X}'
     hx4 = lambda v: f'0x{v:04X}'
     c = ['#include "data_index.h"',
+         'const TileDict fmv_dict = { FMV_DICT_BANK0, FMV_DICT_BANK1, FMV_DICT_BANK2, FMV_DICT_BANK3,'
+         ' FMV_DICT_START1, FMV_DICT_START2, FMV_DICT_START3 };',
          arr('unsigned char', 'fmv_clip_id', [x[0] for x in clips] or [0], hx),
          arr('unsigned char', 'fmv_clip_bank', [x[1] for x in clips] or [0], str),
          arr('unsigned int', 'fmv_clip_addr', [x[2] for x in clips] or [0], hx4),
@@ -228,15 +391,33 @@ def pack(a):
          arr('unsigned char', 'level_bank_aniidx', [x[5] for x in lvl_tab] or [0], str),
          arr('unsigned char', 'level_bank_ani', [x[6] for x in lvl_tab] or [0], str),
          arr('unsigned char', 'anim_palette', anim_palette, hx),
+         'const TileDict spr_dict = { %d, %d, %d, %d, %d, %d, %d };' % spr_desc,
+         arr('unsigned char', 'spr_tab_bank', [x[0] for x in spr_tab], str),
+         arr('unsigned int', 'spr_tab_addr', [x[1] for x in spr_tab], hx4),
+         arr('unsigned int', 'spr_tab_lo', [x[0] for x in spr_lo], str),
+         arr('unsigned int', 'spr_tab_hi', [x[1] for x in spr_lo], str),
+         arr('unsigned char', 'spr_mon_bank', [x[0] for x in spr_mon] or [0], str),
+         arr('unsigned int', 'spr_mon_addr', [x[1] for x in spr_mon] or [0], hx4),
+         arr('unsigned char', 'spr_palette', spr_palette, hx),
+         arr('unsigned char', 'menu_palette', menu_palette, hx),
+         arr('unsigned char', 'level_cutscene',
+             [{0: 0x00, 1: 0x2F, 2: 0xFF, 3: 0x34, 4: 0x39, 5: 0x35, 6: 0xFF}[n] for n in [x[0] for x in lvl_tab]] or [0xFF], hx),
          arr('unsigned char', 'level_bank_ct', [x[7] for x in lvl_tab] or [0], str),
          arr('unsigned int', 'level_npges', [x[3] for x in lvl_tab] or [0], str),
          arr('unsigned char', 'room_num', [x[1] for x in room_tab] or [0], str),
          arr('unsigned char', 'room_bank', [x[2] for x in room_tab] or [0], str),
+         arr('unsigned char', 'room_dict', [x[4] for x in room_tab] or [0], str),
+         'const TileDict room_dicts[] = { ' + ', '.join(
+             '{ %d, %d, %d, %d, %d, %d, %d }' % d for d in room_dicts) + ' };',
          arr('unsigned int', 'room_addr', [x[3] for x in room_tab] or [0], hx4)]
     open(f'{a.out}/data_index.c', 'w').write('\n'.join(c) + '\n')
     total = BANK * 2 + len(b.data)
     print(f'dictionary {len(fmv["dict"])} tiles in {dict_banks} banks; streams to bank {stream_end - 1}; '
           f'{len(room_tab)} rooms ({len(placed)} unique) to bank {b.bank - 1}')
+    import json
+    json.dump({'levels': list(a.levels or []), 'rooms': list(a.rooms or []),
+               'fmv': a.fmv, 'title': a.title, 'sprsets': a.sprsets, 'logic': a.logic},
+              open(f'{a.out}/manifest.json', 'w'), indent=1)
     print(f'ROM usage {total / 1024:.0f} KB of 4096 KB ({100 * total / (4 << 20):.1f}%)')
 
 
@@ -292,7 +473,14 @@ def unplanar(t32):
     return out
 
 
-def play_clip(blob, bank, addr, dict_bank=BANK0):
+def fmv_desc_from(defs):
+    return dict(bank0=defs['FMV_DICT_BANK0'], bank1=defs.get('FMV_DICT_BANK1', 0),
+                bank2=defs.get('FMV_DICT_BANK2', 0), bank3=defs.get('FMV_DICT_BANK3', 0),
+                start1=defs.get('FMV_DICT_START1', 1 << 30), start2=defs.get('FMV_DICT_START2', 1 << 30),
+                start3=defs.get('FMV_DICT_START3', 1 << 30))
+
+
+def play_clip(blob, bank, addr, desc):
     """Decode a stream exactly as src/fmv.c does. Yields (tick, display_on, c6 image)."""
     def rd(pos):
         return blob[pos]
@@ -329,9 +517,9 @@ def play_clip(blob, bank, addr, dict_bank=BANK0):
             slot = ((op & 1) << 8) | blob[pos + 1]
             did = blob[pos + 2] | (blob[pos + 3] << 8)
             if did not in tilecache:
-                o = (dict_bank - BANK0) * BANK + did * 32   # the dictionary is no
-                # longer first in the blob: gameplay data comes before it
-                tilecache[did] = unplanar(blob[o:o + 32])
+                import tilepack as TP
+                at = lambda bk, off, n: blob[(bk - BANK0) * BANK + off:(bk - BANK0) * BANK + off + n]
+                tilecache[did] = unplanar(TP.fetch(at, desc, did))
             vram[slot] = tilecache[did]; pos += 4
         elif op & 0xC0 == F.OP_NTRUN:
             n = (op & 0x3F) + 1
@@ -382,8 +570,8 @@ def verify(a):
     for cid, bank, addr in zip(ids, banks, addrs):
         frames = read_fbv(f'{a.capture}/cut_{cid:02X}.fbv')
         si, errs, off = 0, [], 0
-        dict_bank = defines_from_header(a.out).get('FMV_DICT_BANK0', BANK0)
-        for tick, disp, img in play_clip(blob, bank, addr, dict_bank):
+        desc = fmv_desc_from(defines_from_header(a.out))
+        for tick, disp, img in play_clip(blob, bank, addr, desc):
             tms = tick * 1000 // 60
             while si + 1 < len(frames) and frames[si + 1][0] <= tms:
                 si += 1
@@ -409,7 +597,7 @@ def verify(a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('mode', choices=['pack', 'verify'])
-    ap.add_argument('--fmv'); ap.add_argument('--rooms', nargs='*'); ap.add_argument('--sprites'); ap.add_argument('--title'); ap.add_argument('--levels', nargs='*'); ap.add_argument('--logic'); ap.add_argument('--anim'); ap.add_argument('--out', default='gen')
+    ap.add_argument('--fmv'); ap.add_argument('--rooms', nargs='*'); ap.add_argument('--sprites'); ap.add_argument('--title'); ap.add_argument('--levels', nargs='*'); ap.add_argument('--logic'); ap.add_argument('--anim'); ap.add_argument('--sprsets'); ap.add_argument('--menu'); ap.add_argument('--out', default='gen')
     ap.add_argument('--capture', default='capture'); ap.add_argument('--png')
     ap.add_argument('--max-err', type=float, default=3.0)
     a = ap.parse_args()

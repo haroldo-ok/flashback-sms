@@ -10,9 +10,14 @@
 #include "logic.h"
 #include "room.h"
 #include "sim.h"
+#include "tiledec.h"
 
-#define SPR_SLOTS  32
-#define MAX_PARTS  12
+#define SPR_SLOTS  24
+#define MAX_PARTS  40
+
+/* level parts 4_1/4_2 and 5_1/5_2 share one map, so the rooms of a part live
+ * under the map's own number */
+static const unsigned char part_map[7] = { 0, 1, 2, 3, 3, 5, 5 };
 
 unsigned char sim_sprites;
 unsigned int  sim_uploads;
@@ -21,32 +26,51 @@ unsigned char sim_scroll, sim_room;
 static unsigned int  slot_tile[SPR_SLOTS];
 static unsigned char slot_used[SPR_SLOTS];
 static unsigned char slot_next;
-static unsigned char parts[MAX_PARTS * 4];
 
 static unsigned int rd16(const unsigned char *p)
 {
     return (unsigned int)p[0] | ((unsigned int)p[1] << 8);
 }
 
-static unsigned char slot_for(unsigned int tid)
+/* an 8x16 sprite is two 8x8 tiles from the shared compact dictionary; the
+ * VRAM slot cache is keyed on the pair */
+static unsigned int slot_bot[SPR_SLOTS];
+
+static unsigned char slot_for(unsigned int top, unsigned int bot)
 {
     unsigned char i, s;
     for (i = 0; i < SPR_SLOTS; i++) {
-        if (slot_tile[i] == tid) { slot_used[i] = 1; return i; }
+        if (slot_tile[i] == top && slot_bot[i] == bot) { slot_used[i] = 1; return i; }
     }
     for (i = 0; i < SPR_SLOTS; i++) {          /* a slot not needed this frame */
         s = slot_next;
         slot_next = (unsigned char)((slot_next + 1) % SPR_SLOTS);
         if (!slot_used[s]) {
-            SMS_mapROMBank((unsigned char)(ANIM_TILE_BANK + (tid >> 8)));
-            SMS_loadTiles((const unsigned char *)(0x8000 + ((tid & 255) << 6)), s << 1, 64);
-            slot_tile[s] = tid;
+            tile_upload(&spr_dict, top, s << 1);
+            tile_upload(&spr_dict, bot, (s << 1) + 1);
+            slot_tile[s] = top;
+            slot_bot[s] = bot;
             slot_used[s] = 1;
             sim_uploads++;
             return s;
         }
     }
     return 0xFF;                                /* every slot is in use */
+}
+
+/* Which sprite set draws this object: level objects, Conrad, or - for the
+ * animation numbers the monsters share - the monster type the level assigns
+ * to this object (the engine's loadMonsterSprites, worked out at build time). */
+static unsigned char sprite_set(const LivePGE *pge)
+{
+    unsigned char m;
+    if (pge->flags & 8) return 5;
+    if (pge->anim_number >= 0x22F && pge->anim_number < 0x28E) {
+        SMS_mapROMBank(spr_mon_bank[logic_level]);
+        m = *(const unsigned char *)(spr_mon_addr[logic_level] + pge->index);
+        return (m == 0xFF) ? 0xFF : (unsigned char)(1 + m);
+    }
+    return 0;
 }
 
 /* The engine draws collectibles over the foreground scenery (its blit that
@@ -79,24 +103,24 @@ static void unhide_items(unsigned char idx, unsigned char room)
 
 static void load_room(unsigned char room)
 {
-    unsigned char idx = room_find(0, room);
+    unsigned char idx = room_find(part_map[logic_level], room);
     if (idx == 0xFF) return;
     SMS_displayOff();
     room_load(idx);
     unhide_items(idx, room);
-    SMS_loadSpritePalette(anim_palette);
+    SMS_loadSpritePalette(spr_palette);
     SMS_displayOn();
     sim_room = room;
-    for (idx = 0; idx < SPR_SLOTS; idx++) slot_tile[idx] = 0xFFFF;
+    for (idx = 0; idx < SPR_SLOTS; idx++) { slot_tile[idx] = 0xFFFF; slot_bot[idx] = 0xFFFF; }
 }
 
-void sim_start(void)
+void sim_start(unsigned char level_index)
 {
     unsigned char i;
     logic_check = 0;                            /* run on past any divergence */
     logic_use_pad = 1;                          /* played, not replayed */
-    logic_start();
-    for (i = 0; i < SPR_SLOTS; i++) { slot_tile[i] = 0xFFFF; slot_used[i] = 0; }
+    logic_start(level_index);
+    for (i = 0; i < SPR_SLOTS; i++) { slot_tile[i] = 0xFFFF; slot_bot[i] = 0xFFFF; slot_used[i] = 0; }
     slot_next = 0;
     sim_uploads = 0;
     sim_room = 0xFF;
@@ -125,7 +149,7 @@ static unsigned char pad_mask(void)
 void sim_resume(void)
 {
     unsigned char i;
-    for (i = 0; i < SPR_SLOTS; i++) { slot_tile[i] = 0xFFFF; slot_used[i] = 0; }
+    for (i = 0; i < SPR_SLOTS; i++) { slot_tile[i] = 0xFFFF; slot_bot[i] = 0xFFFF; slot_used[i] = 0; }
     slot_next = 0;
     SMS_useFirstHalfTilesforSprites(1);
     SMS_setSpriteMode(SPRITEMODE_TALL);
@@ -134,8 +158,8 @@ void sim_resume(void)
 
 void sim_step(void)
 {
-    unsigned int off, tid;
-    unsigned char it, guard;
+    unsigned int off, tid, bot;
+    unsigned char it, guard, set, ebank;
     unsigned char n, k, s, facing, count;
     int x, y;
     const unsigned char *p;
@@ -163,28 +187,34 @@ void sim_step(void)
          it = next_in_room[it]) {
         pge = &pge_live[it];
         if (!(pge->flags & 4) || pge->room_location != sim_room) continue;
-        if (pge->anim_number > ANIM_MAX) continue;
-        SMS_mapROMBank(ANIM_TAB_BANK);
-        /* bit 1 mirrors the sprite; bit 3 says whether this animation number
-         * means a character sprite or a level object - they share numbers */
-        facing = ((pge->flags & 2) >> 1) | ((pge->flags & 8) >> 2);
-        off = rd16((const unsigned char *)(0x8000 + ((pge->anim_number << 2) + facing) * 2));
-        if (off == 0xFFFF) continue;
-        SMS_mapROMBank((unsigned char)(ANIM_BLOB_BANK + (off >> 14)));
-        p = (const unsigned char *)(0x8000 + (off & 0x3FFF));
+        set = sprite_set(pge);
+        if (set == 0xFF) continue;
+        if (pge->anim_number < spr_tab_lo[set] || pge->anim_number > spr_tab_hi[set]) continue;
+        /* bit 1 mirrors the sprite */
+        facing = (pge->flags & 2) >> 1;
+        SMS_mapROMBank(spr_tab_bank[set]);
+        {
+            unsigned int e = ((pge->anim_number - spr_tab_lo[set]) << 1) + facing;
+            p = (const unsigned char *)(spr_tab_addr[set] + e * 3);
+        }
+        ebank = p[0];
+        if (!ebank) continue;
+        off = rd16(p + 1);
+        SMS_mapROMBank(ebank);
+        p = (const unsigned char *)off;
         count = *p++;
         if (count > MAX_PARTS) count = MAX_PARTS;
-        /* read each part straight from ROM: uploading a slot pages another
-         * bank in, so just map this one back each time - cheaper than copying
-         * the whole part list into RAM first */
+        /* read each part straight from ROM: uploading pages other banks in,
+         * so map this one back each time */
         for (k = 0; k < count && n < 60; k++) {
-            SMS_mapROMBank((unsigned char)(ANIM_BLOB_BANK + (off >> 14)));
-            pp = (unsigned char *)(p + k * 4);
+            SMS_mapROMBank(ebank);
+            pp = (unsigned char *)(p + k * 6);
             tid = (unsigned int)pp[0] | ((unsigned int)pp[1] << 8);
-            x = pge->pos_x + (signed char)pp[2];
-            y = pge->pos_y + (signed char)pp[3] - sim_scroll;
+            bot = (unsigned int)pp[2] | ((unsigned int)pp[3] << 8);
+            x = pge->pos_x + (signed char)pp[4];
+            y = pge->pos_y + (signed char)pp[5] - sim_scroll;
             if (x < 0 || x > 248 || y < 1 || y > 176) continue;
-            s = slot_for(tid);
+            s = slot_for(tid, bot);
             if (s == 0xFF) continue;
             SMS_addSprite((unsigned char)x, (unsigned char)y, s << 1);
             n++;

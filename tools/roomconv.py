@@ -150,6 +150,11 @@ def main():
             out.append(c)
             continue
         c = convert_room(r, a.max_tiles, 448 - a.max_tiles)
+        shift = (448 - c['ntiles']) - (448 - a.max_tiles)
+        if shift:
+            nt = np.frombuffer(c['nametable'], '<u2').copy()
+            nt += shift                      # the loader puts them at 448 - ntiles
+            c['nametable'] = nt.tobytes()
         seen[h] = c
         if a.png:
             from PIL import Image

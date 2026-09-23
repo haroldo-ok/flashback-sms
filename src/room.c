@@ -6,6 +6,7 @@
 #include "SMSlib.h"
 #include "data_index.h"
 #include "room.h"
+#include "tiledec.h"
 
 unsigned char room_index;
 unsigned char room_tiles;
@@ -21,10 +22,24 @@ void room_load(unsigned char index)
     room_tiles = (unsigned char)n;
     SMS_loadBGPalette(p + 2);
     SMS_loadTileMap(0, 0, p + 18, 32 * 28 * 2);
-    /* tiles sit at the TOP of VRAM (448-n..447) so the low tiles, the only
-     * ones sprite patterns can use, stay free: the converter baked that base
-     * into the nametable entries */
-    SMS_loadTiles(p + 18 + 32 * 28 * 2, 448 - n, n * 32);
+    /* Tiles sit at the TOP of VRAM (448-n..447) so the low tiles - the only
+     * ones sprite patterns can use - stay free; the converter baked that base
+     * into the nametable.  They come from the map's compact dictionary, one
+     * id per VRAM slot; the dictionary pages its own banks, so this room's
+     * bank is re-mapped before each id is read. */
+    {
+        const TileDict *dict = &room_dicts[room_dict[index]];
+        const unsigned char *ids = p + 18 + 32 * 28 * 2;
+        unsigned int i, id, base = 448 - n;
+        unsigned char bank = room_bank[index];
+        for (i = 0; i < n; i++) {
+            SMS_mapROMBank(bank);
+            id = ids[0] | ((unsigned int)ids[1] << 8);
+            ids += 2;
+            tile_upload(dict, id, base + i);
+        }
+        SMS_mapROMBank(bank);
+    }
 }
 
 unsigned char room_find(unsigned char level, unsigned char room)

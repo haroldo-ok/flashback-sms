@@ -41,17 +41,27 @@ def main():
     ap.add_argument('trace')
     ap.add_argument('--out', required=True)
     ap.add_argument('--frames', type=int, default=0)
+    ap.add_argument('--sets', action='store_true', help='full-game sprite dump keyed by set')
     a = ap.parse_args()
 
     best = {}          # (anim, facing) -> (area, pixels(c6), dx, dy)
     hist = {}
     for f in read_fbt(a.trace, a.frames or None):
+        # full-game sprite dump: the frame's room byte carries the sprite set
+        # (0 Conrad, 1..4 monsters, 10+level objects); objects are the same
+        # global sprites in every level, so they collapse to one set (10)
+        setid = f['room'] if a.sets else None
+        if setid is not None and setid >= 10:
+            if setid != 10:
+                continue
+
         rgb2 = to_sms_rgb(f['pal'])
         c6lut = (rgb2[:, 0] | (rgb2[:, 1] << 2) | (rgb2[:, 2] << 4)).astype(np.int32)
         for p in f['pieces']:
             # characters (sprite data) and objects (level sprites) are numbered
             # in the SAME space, so the kind is part of the key
-            key = (p['anim'], (p['pge_flags'] & 2) >> 1, (p['pge_flags'] & 8) >> 3)
+            key = ((setid, p['anim'], (p['pge_flags'] & 2) >> 1) if setid is not None
+                   else (p['anim'], (p['pge_flags'] & 2) >> 1, (p['pge_flags'] & 8) >> 3))
             area = int((p['pix'] != 0).sum())
             if area == 0:
                 continue
@@ -89,7 +99,7 @@ def main():
         if parts:
             entries[key] = parts
 
-    anims = sorted({k[0] for k in entries})
+    anims = sorted({(k[1] if a.sets else k[0]) for k in entries})
     sizes = [len(v) for v in entries.values()]
     print(f'{len(entries)} (anim, mirror, kind) entries over {len(anims)} animation numbers, '
           f'max anim number {max(anims)}')

@@ -151,6 +151,29 @@ skipped and the game carries on.  The opcodes level 1 actually needs were then
 ported by checking the level's own object data against the implemented set -
 27 were missing, including `pickupObject` itself.
 
+## The full build: all five levels
+The default build is the whole game's five levels in one 4 MB ROM (4,080 KB of
+4,096 used), chosen from the title screen:
+
+* the level select draws "LEVEL 1..5" with the game's own menu font, captured
+  from the engine and drawn as background cells using the sprite palette,
+  because the title screen's own text is part of its picture
+* up/down choose, any button starts, and the level's own intro cutscene plays
+  first where the game has one
+* 193 rooms, object tables for all seven level parts, six sprite sets (Conrad,
+  four monster types and the shared level objects), 27 cutscenes
+
+Everything is stored losslessly compressed (tools/tilepack.py): tiles keep
+only their non-constant bit-planes, a plane may be the complement of another,
+and the Z80 rebuilds each tile exactly before uploading it.  That takes 46% off
+the cutscene tiles, 31% off rooms and 33% off sprites.  The cutscene dictionary
+is the reason it fits at all.
+
+What did not fit: the second and third parts of the game intro and level 4's
+36-second approach - the three longest clips - so the intro is the logos, and
+the mission briefings and ending are out.  Level 2 has 256 objects and the live
+table holds 255, so its last object is not simulated.
+
 ## The demo build
 The default build is a self-contained demo of level 1:
 
@@ -160,6 +183,10 @@ The default build is a self-contained demo of level 1:
 * any button starts level 1, after level 1's own intro cutscene (clip 0x00)
 * the level itself, its objects and animations; PAUSE returns to the title
 * the other levels and the room viewer are not built in
+* the cutscenes that level 1's own scripts ask for (opcode 0x5A) - the ones
+  that play when you pick certain items up - are included: 15 of the 21 it
+  can request.  The other six (0x03, 0x08, 0x13, 0x17, 0x1E, 0x1F) are not in
+  the demo's data at all, so a request for one of those is skipped.
 * items are visible and can be picked up.  The engine draws collectibles
   with its blit that ignores the foreground mask, so they sit on top of
   scenery; an SMS sprite cannot override a background tile's priority, so the
@@ -170,7 +197,7 @@ The default build is a self-contained demo of level 1:
   flat-shaded polygon artwork is exactly the case it damages most, so the
   cutscenes are stored unmerged.
 
-The whole thing is 2 MB.
+The whole thing is 2.7 MB (a 4 MB ROM image).
 
 ## Playing it
 From the title screen any button starts the game.  The d-pad moves, button 2

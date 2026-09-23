@@ -9,14 +9,14 @@ SELF_TEST ?= 0
 TEST_NO_INVENTORY ?= 0
 CFLAGS := -mz80 -I$(DEVKIT)/include -Igen -Isrc --peep-file $(DEVKIT)/include/peep-rules.txt --max-allocs-per-node 20000 -DSELF_TEST=$(SELF_TEST) -DTEST_NO_INVENTORY=$(TEST_NO_INVENTORY)
 LDFLAGS:= -mz80 --no-std-crt0 --data-loc 0xC000
-OBJS   := build/main.rel build/fmv.rel build/room.rel build/pge.rel build/logic.rel build/sim.rel build/data_index.rel
+OBJS   := build/main.rel build/fmv.rel build/room.rel build/pge.rel build/logic.rel build/sim.rel build/tiledec.rel build/data_index.rel
 DEMO   ?= demo/DATA
 DICT_MERGE ?= 0      # 0 = no tile merging: flat-shaded polygons suffer from it      # merge cutscene tiles differing in <= N pixels (saves ~530 KB)
 CAP    ?= capture
 
 all: flashback.sms
 
-build/%.rel: src/%.c gen/data_index.h src/fmv.h src/room.h src/pge.h src/logic.h src/sim.h
+build/%.rel: src/%.c gen/data_index.h src/fmv.h src/room.h src/pge.h src/logic.h src/sim.h src/tiledec.h
 	@mkdir -p build; $(CC) $(CFLAGS) -c $< -o $@
 build/data_index.rel: gen/data_index.c gen/data_index.h
 	@mkdir -p build; $(CC) $(CFLAGS) -c $< -o $@
@@ -40,7 +40,9 @@ capture: fbdump
 	tools/fbdump/fbdump $(DEMO) anims $(CAP)     # every animation frame, for played gameplay
 	for l in 0 2 5; do tools/fbdump/fbdump $(DEMO) level $(CAP) $$l; done
 convert:
-	python3 tools/fmvenc.py --out gen/fmv.pkl $(CAP)/cut_40.fbv $(CAP)/cut_0D.fbv $(CAP)/cut_4A.fbv $(CAP)/cut_00.fbv
+	# the intro, level 1's entry, and every cutscene level 1's scripts can ask
+	# for (opcode 0x5A) that exists in the demo data - picking items up plays them
+	python3 tools/fmvenc.py --out gen/fmv.pkl $(foreach c,40 0D 4A 00 01 02 04 05 09 0A 0E 0F 10 11 12 14 15 2C 31,$(CAP)/cut_$(c).fbv)
 	python3 tools/roomconv.py $(CAP)/rooms_L0.fbr --out gen/rooms_L0.pkl
 	python3 tools/levelconv.py $(CAP)/level_L0.fbl --out gen/level_L0.pkl
 	python3 tools/roomconv.py $(CAP)/title.fbr --out gen/title.pkl --max-tiles 447

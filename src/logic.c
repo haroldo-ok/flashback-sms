@@ -63,7 +63,9 @@ unsigned int  logic_expected;
 
 static unsigned char s_bank_a, s_bank_obj, s_bank_aniidx, s_bank_ani, s_bank_logic;
 static unsigned int  s_total_frames;
-unsigned char logic_cur_room;   /* the engine's _currentRoom */
+unsigned char logic_cur_room;
+unsigned char logic_level;
+unsigned char col_peak_pos, col_peak_slot, msg_peak, ov_peak;       /* level part being played (0..6) */
 #define s_room logic_cur_room
 static unsigned char s_inp;             /* _pge_inpKeysMask */
 static unsigned char s_facing, s_pge_room;
@@ -73,7 +75,7 @@ static int s_gun_var;              /* the engine's _pge_opGunVar */
 static unsigned long s_rand;
 
 /* message queue: one list head per object, entries in a small pool */
-#define MSG_POOL 96
+#define MSG_POOL 64
 static unsigned char msg_head[MAX_PGE];
 static unsigned char msg_next[MSG_POOL], msg_src[MSG_POOL], msg_num[MSG_POOL];
 static unsigned char msg_free;
@@ -99,17 +101,6 @@ static unsigned char col_prev[COL_SLOTS];      /* previous slot in this cell */
 static unsigned char col_table[COL_SLOTS];     /* head slot per occupied cell */
 static unsigned char col_cur_pos, col_cur_slot;
 
-/* Finding which cell a grid position belongs to was a linear scan over every
- * occupied cell, run for every collision slot of every object - the single
- * hottest thing in the frame.  A small open-addressing index replaces it. */
-#define COL_HASH 128
-static unsigned int  hash_pos[COL_HASH];
-static unsigned char hash_idx[COL_HASH];
-
-static unsigned char col_hash(unsigned int pos)
-{
-    return (unsigned char)((pos ^ (pos >> 5)) & (COL_HASH - 1));
-}
 static unsigned char col_left_room, col_right_room;
 static int s_grid_x, s_grid_y;                 /* current object's grid cell */
 
@@ -124,7 +115,7 @@ static unsigned char s_bank_ct;
  * those writes last for the rest of the level - but the grid lives in ROM.
  * Modified spans are therefore kept in RAM and consulted by every grid read,
  * which is the engine's own slot-2 mechanism seen from the other side. */
-#define OVERLAY_SPANS 24
+#define OVERLAY_SPANS 16
 #define OVERLAY_LEN   16
 static unsigned int  ov_off[OVERLAY_SPANS];
 static unsigned char ov_len[OVERLAY_SPANS];
@@ -180,7 +171,6 @@ static void col_clear_state(void)
     unsigned char i;
     col_cur_pos = 0;
     col_cur_slot = 0;
-    for (i = 0; i < COL_HASH; i++) hash_idx[i] = 0xFF;
 }
 
 static unsigned int col_get_grid_pos(LivePGE *pge, int dx)
@@ -201,25 +191,10 @@ static unsigned int col_get_grid_pos(LivePGE *pge, int dx)
 
 static int col_find_slot(unsigned int pos)
 {
-    unsigned char h = col_hash(pos), n = 0;
-    while (hash_idx[h] != 0xFF) {
-        if (hash_pos[h] == pos) return hash_idx[h];
-        h = (unsigned char)((h + 1) & (COL_HASH - 1));
-        if (++n == COL_HASH) break;
-    }
+    unsigned char i;
+    for (i = 0; i < col_cur_pos; i++)
+        if (col_ct_pos[col_table[i]] == pos) return i;
     return -1;
-}
-
-static void col_hash_add(unsigned int pos, unsigned char idx)
-{
-    unsigned char h = col_hash(pos), n = 0;
-    while (hash_idx[h] != 0xFF) {
-        if (hash_pos[h] == pos) return;
-        h = (unsigned char)((h + 1) & (COL_HASH - 1));
-        if (++n == COL_HASH) return;
-    }
-    hash_pos[h] = pos;
-    hash_idx[h] = idx;
 }
 
 static void col_prepare_piege_state(LivePGE *pge)
@@ -273,9 +248,10 @@ static void col_prepare_piege_state(LivePGE *pge)
             col_prev[slot2] = 0xFF;
             if (col_cur_pos >= COL_SLOTS) return;
             col_table[col_cur_pos] = slot2;
+            if (col_cur_pos > col_peak_pos) col_peak_pos = col_cur_pos;
+            if (col_cur_slot > col_peak_slot) col_peak_slot = col_cur_slot;
             if (slot1 == 0xFF) pge->collision_slot = col_cur_pos;
             else col_index[slot1] = col_cur_pos;
-            col_hash_add(pos, col_cur_pos);
             col_cur_pos++;
         }
         slot1 = slot2;
@@ -351,15 +327,56 @@ static unsigned char bad_pge(unsigned char i)
     return (i >= pge_num || i >= MAX_PGE);
 }
 
+/* Inventory links (who carries what) as a small side table: only Conrad and
+ * the few items being carried ever need them, so three bytes for every one of
+ * the 255 objects would be RAM this machine does not have. */
+#define INV_SLOTS 40
+static unsigned char inv_owner[INV_SLOTS];
+static unsigned char inv_cur_v[INV_SLOTS], inv_next_v[INV_SLOTS], inv_ref_v[INV_SLOTS];
+
+static unsigned char inv_find(unsigned char idx)
+{
+    unsigned char i;
+    for (i = 0; i < INV_SLOTS; i++)
+        if (inv_owner[i] == idx) return i;
+    return 0xFF;
+}
+
+static unsigned char inv_make(unsigned char idx)
+{
+    unsigned char i = inv_find(idx);
+    if (i != 0xFF) return i;
+    for (i = 0; i < INV_SLOTS; i++)
+        if (inv_owner[i] == 0xFF) {
+            inv_owner[i] = idx;
+            inv_cur_v[i] = inv_next_v[i] = inv_ref_v[i] = 0xFF;
+            return i;
+        }
+    return 0xFF;                       /* pool full: the link is dropped */
+}
+
+static unsigned char inv_cur_get(unsigned char idx)
+{ unsigned char i = inv_find(idx); return (i == 0xFF) ? 0xFF : inv_cur_v[i]; }
+static unsigned char inv_next_get(unsigned char idx)
+{ unsigned char i = inv_find(idx); return (i == 0xFF) ? 0xFF : inv_next_v[i]; }
+static unsigned char inv_ref_get(unsigned char idx)
+{ unsigned char i = inv_find(idx); return (i == 0xFF) ? 0xFF : inv_ref_v[i]; }
+static void inv_cur_set(unsigned char idx, unsigned char v)
+{ unsigned char i = inv_make(idx); if (i != 0xFF) inv_cur_v[i] = v; }
+static void inv_next_set(unsigned char idx, unsigned char v)
+{ unsigned char i = inv_make(idx); if (i != 0xFF) inv_next_v[i] = v; }
+static void inv_ref_set(unsigned char idx, unsigned char v)
+{ unsigned char i = inv_make(idx); if (i != 0xFF) inv_ref_v[i] = v; }
+
 /* inventory list helpers */
 static unsigned char inv_prev_item(unsigned char pge, unsigned char last)
 {
     if (bad_pge(pge)) return pge;
-    unsigned char di = pge, n = pge_live[pge].current_inventory_PGE, guard = 0;
+    unsigned char di = pge, n = inv_cur_get(pge), guard = 0;
     while (n != 0xFF && guard++ < MAX_PGE) {
         if (n == last) break;
         di = n;
-        n = pge_live[di].next_inventory_PGE;
+        n = inv_next_get(di);
     }
     return di;
 }
@@ -367,13 +384,13 @@ static unsigned char inv_prev_item(unsigned char pge, unsigned char last)
 static void inv_remove(unsigned char p1, unsigned char p2, unsigned char p3)
 {
     if (bad_pge(p1) || bad_pge(p2) || bad_pge(p3)) return;
-    pge_live[p2].ref_inventory_PGE = 0xFF;
+    inv_ref_set(p2, 0xFF);
     if (p3 == p1) {
-        pge_live[p3].current_inventory_PGE = pge_live[p2].next_inventory_PGE;
+        inv_cur_set(p3, inv_next_get(p2));
     } else {
-        pge_live[p1].next_inventory_PGE = pge_live[p2].next_inventory_PGE;
+        inv_next_set(p1, inv_next_get(p2));
     }
-    pge_live[p2].next_inventory_PGE = 0xFF;
+    inv_next_set(p2, 0xFF);
 }
 
 static void inv_update(unsigned char p1, unsigned char p2)
@@ -383,23 +400,23 @@ static void inv_update(unsigned char p1, unsigned char p2)
 #if TEST_NO_INVENTORY
     return;                 /* test build: does the pickup still freeze? */
 #endif
-    if (pge_live[p2].ref_inventory_PGE != 0xFF) {       /* reorder */
-        unsigned char bx = pge_live[p2].ref_inventory_PGE;
+    if (inv_ref_get(p2) != 0xFF) {       /* reorder */
+        unsigned char bx = inv_ref_get(p2);
         unsigned char di = inv_prev_item(bx, p2);
         if (di == bx) {
-            if (pge_live[di].current_inventory_PGE == p2) inv_remove(di, p2, bx);
+            if (inv_cur_get(di) == p2) inv_remove(di, p2, bx);
         } else {
-            if (pge_live[di].next_inventory_PGE == p2) inv_remove(di, p2, bx);
+            if (inv_next_get(di) == p2) inv_remove(di, p2, bx);
         }
     }
     ax = inv_prev_item(p1, 0xFF);
-    pge_live[p2].ref_inventory_PGE = p1;
+    inv_ref_set(p2, p1);
     if (ax == p1) {
-        pge_live[p2].next_inventory_PGE = pge_live[ax].current_inventory_PGE;
-        pge_live[ax].current_inventory_PGE = p2;
+        inv_next_set(p2, inv_cur_get(ax));
+        inv_cur_set(ax, p2);
     } else {
-        pge_live[p2].next_inventory_PGE = pge_live[ax].next_inventory_PGE;
-        pge_live[ax].next_inventory_PGE = p2;
+        inv_next_set(p2, inv_next_get(ax));
+        inv_next_set(ax, p2);
     }
 }
 
@@ -553,8 +570,8 @@ static unsigned int col_hit_helper(unsigned char other, int msg_num)
     Obj obj;
     node = init_field16(other, I_NODE);
     SMS_mapROMBank(s_bank_a);
-    first = rd16((const unsigned char *)(0x8002 + pge_num * INIT_PGE_SIZE + node * 2));
-    count = rd16((const unsigned char *)(0x8002 + pge_num * INIT_PGE_SIZE + 512 + node * 2));
+    first = rd16((const unsigned char *)(0x8002 + pge_total * INIT_PGE_SIZE + node * 2));
+    count = rd16((const unsigned char *)(0x8002 + pge_total * INIT_PGE_SIZE + 512 + node * 2));
     i = pge_live[other].first_obj;
     while (i < count) {
         read_object(first + i, &obj);
@@ -684,13 +701,13 @@ static void do_drop(LivePGE *pge, unsigned char src_index)
     pge->room_location = src->room_location;
     pge->flags &= ~1;
     if (src->flags & 1) pge->flags |= 1;
-    if (pge->ref_inventory_PGE != 0xFF) {
-        unsigned char bx = pge->ref_inventory_PGE;
+    if (inv_ref_get(pge->index) != 0xFF) {
+        unsigned char bx = inv_ref_get(pge->index);
         unsigned char di = inv_prev_item(bx, pge->index);
         if (di == bx) {
-            if (pge_live[di].current_inventory_PGE == pge->index) inv_remove(di, pge->index, bx);
+            if (inv_cur_get(di) == pge->index) inv_remove(di, pge->index, bx);
         } else {
-            if (pge_live[di].next_inventory_PGE == pge->index) inv_remove(di, pge->index, bx);
+            if (inv_next_get(di) == pge->index) inv_remove(di, pge->index, bx);
         }
     }
 }
@@ -828,7 +845,7 @@ static int exec_op(unsigned char op, LivePGE *pge, int a, int b)
                 other = col_live[cs];
                 if (other != pge->index) {
                     if (init_field8(other, 18) == 3 &&        /* collectible */
-                        pge->index != pge_live[other].ref_inventory_PGE) return 0;
+                        pge->index != inv_ref_get(other)) return 0;
                 } else {
                     slot = col_index[cs];
                 }
@@ -873,19 +890,19 @@ static int exec_op(unsigned char op, LivePGE *pge, int a, int b)
         if (bad_pge((unsigned char)a)) return 1;
         inv = inv_prev_item((unsigned char)a, pge->index);
         if (inv == (unsigned char)a) {
-            if (pge->index != pge_live[inv].current_inventory_PGE) return 1;
+            if (pge->index != inv_cur_get(inv)) return 1;
         } else {
-            if (pge->index != pge_live[inv].next_inventory_PGE) return 1;
+            if (pge->index != inv_next_get(inv)) return 1;
         }
         inv_remove(inv, pge->index, (unsigned char)a);
         return 1;
     }
     case 0x4E: {                                  /* scrollPosY: carry the inventory */
-        unsigned char it = pge->current_inventory_PGE, g = 0;
+        unsigned char it = inv_cur_get(pge->index), g = 0;
         pge->pos_y += a;
         while (it != 0xFF && !bad_pge(it) && g++ < MAX_PGE) {
             pge_live[it].pos_y += a;
-            it = pge_live[it].next_inventory_PGE;
+            it = inv_next_get(it);
         }
         return 1;
     }
@@ -905,13 +922,13 @@ static int exec_op(unsigned char op, LivePGE *pge, int a, int b)
     case 0x71:                                    /* exitInvMessage */
         for (e = msg_head[pge->index]; e != 0xFF; e = msg_next[e]) {
             if (msg_num[e] == a) {
-                unsigned char r = pge->ref_inventory_PGE;
+                unsigned char r = inv_ref_get(pge->index);
                 if (r != 0xFF && !bad_pge(r)) {
                     unsigned char di = inv_prev_item(r, pge->index);
                     if (di == r) {
-                        if (pge_live[di].current_inventory_PGE == pge->index) inv_remove(di, pge->index, r);
+                        if (inv_cur_get(di) == pge->index) inv_remove(di, pge->index, r);
                     } else {
-                        if (pge_live[di].next_inventory_PGE == pge->index) inv_remove(di, pge->index, r);
+                        if (inv_next_get(di) == pge->index) inv_remove(di, pge->index, r);
                     }
                 }
                 return 1;
@@ -936,12 +953,12 @@ static int exec_op(unsigned char op, LivePGE *pge, int a, int b)
         }
         return 0;
     case 0x32:                                    /* removeItemFromInventory */
-        if (pge->current_inventory_PGE != 0xFF)
-            msg_send(pge->index, pge->current_inventory_PGE, (unsigned char)a);
+        if (inv_cur_get(pge->index) != 0xFF)
+            msg_send(pge->index, inv_cur_get(pge->index), (unsigned char)a);
         return 1;
     case 0x33:                                    /* canUseCurrentInventoryItem */
-        if (pge_live[0].current_inventory_PGE != 0xFF &&
-            init_field8(pge_live[0].current_inventory_PGE, 24) == (unsigned char)a) return 1;
+        if (inv_cur_get(0) != 0xFF &&
+            init_field8(inv_cur_get(0), 24) == (unsigned char)a) return 1;
         return 0;
     case 0x34:                                    /* use object in front */
         if (((s_inp & 0x0F) | mod_keys[0]) == s_inp && col_get_grid_data(pge, 2, -a) == 0)
@@ -1033,10 +1050,10 @@ static int exec_op(unsigned char op, LivePGE *pge, int a, int b)
     case 0x64:                                    /* gun shot */
         return col_detect_gun_hit(pge, a, b, 1);
     case 0x83: {                                  /* hasInventoryItem */
-        unsigned char it = pge_live[0].current_inventory_PGE;
+        unsigned char it = inv_cur_get(0);
         while (it != 0xFF) {
             if (init_field8(it, 24) == (unsigned char)a) return 0xFFFF;   /* object_id */
-            it = pge_live[it].next_inventory_PGE;
+            it = inv_next_get(it);
         }
         return 0;
     }
@@ -1204,7 +1221,7 @@ static void pge_message_ack(LivePGE *pge)
 
     node = init_field16(pge->index, I_NODE);
     SMS_mapROMBank(s_bank_a);
-    first = rd16((const unsigned char *)(0x8002 + pge_num * INIT_PGE_SIZE + node * 2));
+    first = rd16((const unsigned char *)(0x8002 + pge_total * INIT_PGE_SIZE + node * 2));
     i = first + pge->first_obj;
     for (guard = 0; guard < 4000; guard++) {   /* never spin on unreadable data */
         read_object(i, &obj);
@@ -1258,7 +1275,7 @@ static void pge_process(LivePGE *pge)
     if (seq_count <= pge->anim_seq) {
         node = init_field16(pge->index, I_NODE);
         SMS_mapROMBank(s_bank_a);
-        first = rd16((const unsigned char *)(0x8002 + pge_num * INIT_PGE_SIZE + node * 2));
+        first = rd16((const unsigned char *)(0x8002 + pge_total * INIT_PGE_SIZE + node * 2));
         first += pge->first_obj;
         for (guard = 0; guard < 4000; guard++) {
             read_object(first, &obj);
@@ -1286,16 +1303,19 @@ static unsigned int state_checksum(void)
     return s;
 }
 
-void logic_start(void)
+void logic_start(unsigned char level_index)
 {
     unsigned int i;
-    s_bank_a = level_bank_a[0];
-    s_bank_obj = level_bank_obj[0];
-    s_bank_aniidx = level_bank_aniidx[0];
-    s_bank_ani = level_bank_ani[0];
-    s_bank_ct = level_bank_ct[0];
+    /* every one of these is per level: with them pinned to level 1 the other
+     * levels ran on level 1's collision map and walked through their floors */
+    s_bank_a = level_bank_a[level_index];
+    s_bank_obj = level_bank_obj[level_index];
+    s_bank_aniidx = level_bank_aniidx[level_index];
+    s_bank_ani = level_bank_ani[level_index];
+    s_bank_ct = level_bank_ct[level_index];
     s_bank_logic = LOGIC_BANK;
-    pge_load_level(0);
+    logic_level = level_num[level_index];     /* which level part is running */
+    pge_load_level(level_index);
     SMS_mapROMBank(s_bank_logic);
     s_total_frames = rd16((const unsigned char *)0x8000);
     /* the engine moves Conrad to the demo's start point when replaying a demo;
@@ -1315,6 +1335,7 @@ void logic_start(void)
     msg_free = 0;
     for (i = 0; i < MSG_POOL; i++) { msg_next[i] = (i + 1 < MSG_POOL) ? i + 1 : 0xFF; }
     for (i = 0; i < MAX_PGE; i++) { msg_head[i] = 0xFF; next_in_room[i] = 0xFF; in_list[i] = 0xFF; }
+    for (i = 0; i < INV_SLOTS; i++) inv_owner[i] = 0xFF;
     for (i = 0; i < 64; i++) room_head[i] = 0xFF;
     for (i = 0; i < pge_num; i++) {
         if (init_field8((unsigned char)i, 25) <= pge_skill) {   /* skill */

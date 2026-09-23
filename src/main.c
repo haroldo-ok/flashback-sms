@@ -26,13 +26,18 @@ unsigned char seq_pos;            /* position in the intro sequence */
 unsigned int  last_clip_ticks;    /* ticks the previous clip ran (tests) */
 unsigned int  last_clip_uploads;
 unsigned char is_pal;
-unsigned int  pge_sum[3];       /* per level: checked against the original engine */
-unsigned int  pge_act[3];
-unsigned int  pge_cnt[3];
+unsigned int  pge_sum[NUM_LEVELS];  /* per level: checked against the original engine */
+unsigned int  pge_act[NUM_LEVELS];
+unsigned int  pge_cnt[NUM_LEVELS];
 unsigned char pge_loaded;
 unsigned char self_test;
 unsigned char return_to_sim;
-unsigned char start_after_clip;  /* the level intro is playing */    /* a cutscene the game asked for, mid-play */        /* boot diagnostics ran (button 1 held) */       /* levels whose tables are built */
+unsigned char start_after_clip;
+unsigned int  skip_prev;         /* pad state at the previous poll, for a true edge */
+unsigned char level_sel;         /* 0..4: the level chosen on the title screen */
+/* levels 4 and 5 are two parts each; a game starts at the first of them */
+static const unsigned char level_start[5] = { 0, 1, 2, 3, 5 };
+#define NUM_SEL 5        /* skip button seen released during this clip */  /* the level intro is playing */    /* a cutscene the game asked for, mid-play */        /* boot diagnostics ran (button 1 held) */       /* levels whose tables are built */
 volatile unsigned char frames_elapsed;  /* ++ in the frame interrupt */
 unsigned int  ticks_behind;             /* cutscene lag in ticks (tests) */
 
@@ -66,7 +71,6 @@ static unsigned char detect_pal(void)
 }
 
 static const unsigned char intro_seq[] = { 0x40, 0x0D, 0x4A };
-#define LEVEL1_CUTSCENE 0x00
 #define INTRO_LEN (sizeof intro_seq)
 
 static void hide_sprites(void)
@@ -75,6 +79,23 @@ static void hide_sprites(void)
     SMS_finalizeSprites();
     SMS_copySpritestoSAT();
 }
+
+#if HAS_MENU
+/* Draw the chosen level's text over the title picture.  The tiles go into the
+ * low VRAM slots (free here: the title screen uses no sprites) and the cells
+ * select the sprite palette, so the text keeps its own colours. */
+#define MENU_ROW 23
+#define MENU_COL 2
+static void draw_level_text(void)
+{
+    const unsigned char *cells;
+    unsigned char i;
+    SMS_mapROMBank(MENU_BANK);
+    cells = (const unsigned char *)(MENU_ADDR + MENU_NTILES * 32 + level_sel * MENU_CELLS);
+    SMS_setNextTileatXY(MENU_COL, MENU_ROW);
+    for (i = 0; i < MENU_CELLS; i++) SMS_setTile(cells[i] | 0x0800);   /* sprite palette */
+}
+#endif
 
 /* the title screen is packed as a room of its own (level 99) */
 static void enter_title(void)
@@ -85,14 +106,33 @@ static void enter_title(void)
     hide_sprites();
     if (idx != 0xFF) room_load(idx);
     SMS_setBGScrollY(0);
+#if HAS_MENU
+    SMS_mapROMBank(MENU_BANK);
+    SMS_loadTiles((const unsigned char *)MENU_ADDR, 0, MENU_NTILES * 32);
+    SMS_loadSpritePalette(menu_palette);
+    draw_level_text();
+#endif
     SMS_displayOn();
     game_state = ST_TITLE;
 }
 
 static void play_clip(unsigned char clip)
 {
+    skip_prev = 0xFFFF;              /* a button held from the menu is not a press */
     fmv_start(clip);
     game_state = ST_CUTSCENE;
+}
+
+/* the next clip of the intro that is actually in this build */
+static unsigned char next_intro_clip(void)
+{
+    unsigned char c;
+    while (seq_pos < INTRO_LEN) {
+        c = fmv_find(intro_seq[seq_pos]);
+        if (c != 0xFF) return c;
+        seq_pos++;                       /* not built in: skip it */
+    }
+    return 0xFF;
 }
 
 static void clip_finished(void)
@@ -108,16 +148,15 @@ static void clip_finished(void)
     }
     if (start_after_clip) {         /* level 1's own intro just finished */
         start_after_clip = 0;
-        sim_start();
+        sim_start(level_start[level_sel]);
         game_state = ST_SIM;
         return;
     }
     if (seq_pos < INTRO_LEN) {
+        unsigned char c;
         seq_pos++;
-        if (seq_pos < INTRO_LEN) {
-            unsigned char c = fmv_find(intro_seq[seq_pos]);
-            if (c != 0xFF) { play_clip(c); return; }
-        }
+        c = next_intro_clip();
+        if (c != 0xFF) { play_clip(c); return; }
     }
     enter_title();
 }
@@ -143,7 +182,7 @@ void main(void)
     self_test = 1;
     {
         unsigned char l;
-        for (l = 0; l < NUM_LEVELS && l < 3; l++) {
+        for (l = 0; l < NUM_LEVELS; l++) {
             pge_load_level(l);
             pge_sum[l] = pge_checksum;
             pge_act[l] = pge_active;
@@ -151,15 +190,16 @@ void main(void)
             pge_loaded = l + 1;
         }
 #if HAS_LOGIC
-        logic_start();
+        logic_start(0);
         while (logic_step()) { }
 #endif
     }
+    frames_elapsed = 0;   /* the harness ran for a minute: that is not cutscene lag */
 #endif
     seq_pos = 0;
     room_index = 0;
     {   /* a build without cutscenes starts in the room viewer */
-        unsigned char c0 = (FMV_NUM_CLIPS > 0) ? fmv_find(intro_seq[0]) : 0xFF;
+        unsigned char c0 = (FMV_NUM_CLIPS > 0) ? next_intro_clip() : 0xFF;
         if (c0 == 0xFF) { seq_pos = INTRO_LEN; enter_title(); }
         else play_clip(c0);
     }
@@ -179,15 +219,32 @@ void main(void)
             /* streams are 60 Hz ticks: run 5 (NTSC) or 6 (PAL) ticks per 5
              * frames, and catch up after an overrun during the cheap wait
              * ticks that follow each ~12 fps picture change */
-            unsigned char alive = 1, budget = 3;
+            unsigned char alive = 1, budget = 3, skip = 0;
             tick_acc += e * (is_pal ? 6 : 5);
             while (tick_acc >= 5 && alive && budget--) {
                 tick_acc -= 5;
                 alive = fmv_step();
+                /* Poll the skip button between ticks: at a shot cut one pass
+                 * of this loop can run for 15+ frames, long enough for a whole
+                 * press to fall between two polls.  It is a real edge against
+                 * the previous poll - a button still held from the title
+                 * screen counts as down, so it cannot skip the level's intro. */
+                {
+                    unsigned int k = SMS_getKeysStatus();
+                    if ((k & PORT_A_KEY_1) && !(skip_prev & PORT_A_KEY_1)) { skip = 1; skip_prev = k; break; }
+                    skip_prev = k;
+                }
             }
             ticks_behind = tick_acc / 5;
             if (tick_acc > 200) tick_acc = 200;    /* 40-tick cap; the 3-step budget stops spirals */
-            if (pressed & PORT_A_KEY_1) {
+            {   /* a fresh read: `keys` was taken before the ticks above ran,
+                 * and comparing that stale value against the newer poll made a
+                 * release look like a press */
+                unsigned int k = SMS_getKeysStatus();
+                if ((k & PORT_A_KEY_1) && !(skip_prev & PORT_A_KEY_1)) skip = 1;
+                skip_prev = k;
+            }
+            if (skip) {
                 if (seq_pos < INTRO_LEN) seq_pos = INTRO_LEN - 1;   /* skip the rest of the intro */
                 alive = 0;
             }
@@ -222,11 +279,17 @@ void main(void)
                 hide_sprites();
                 enter_title();
             }
-        } else {                    /* title screen: any button starts level 1 */
+        } else {                    /* title screen: pick a level, any button starts it */
+#if HAS_MENU
+            if ((pressed & PORT_A_KEY_UP) && level_sel) { level_sel--; draw_level_text(); }
+            else if ((pressed & PORT_A_KEY_DOWN) && level_sel + 1 < NUM_SEL
+                     && level_start[level_sel + 1] < NUM_LEVELS) { level_sel++; draw_level_text(); }
+#endif
             if (pressed & (PORT_A_KEY_1 | PORT_A_KEY_2)) {
-                unsigned char c = fmv_find(LEVEL1_CUTSCENE);
+                unsigned char lv = level_start[level_sel];
+                unsigned char c = fmv_find(level_cutscene[lv]);
                 if (c != 0xFF) { start_after_clip = 1; play_clip(c); }
-                else { sim_start(); game_state = ST_SIM; }
+                else { sim_start(level_start[level_sel]); game_state = ST_SIM; }
             }
         }
     }

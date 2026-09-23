@@ -10,6 +10,7 @@
  */
 #include "SMSlib.h"
 #include "data_index.h"
+#include "tiledec.h"
 #include "fmv.h"
 
 #define OP_TICK     0
@@ -78,8 +79,7 @@ unsigned char fmv_step(void)
             unsigned int slot = ((unsigned int)(op & 1) << 8) | s_ptr[0];
             unsigned int id = s_ptr[1] | ((unsigned int)s_ptr[2] << 8);
             s_ptr += 3;
-            SMS_mapROMBank(FMV_DICT_BANK0 + (id >> 9));
-            SMS_loadTiles((const unsigned char *)(0x8000 + ((id & 511) << 5)), slot, 32);
+            tile_upload(&fmv_dict, id, slot);      /* compact dictionary */
             SMS_mapROMBank(s_bank);
             fmv_uploads++;
         } else switch (op) {
