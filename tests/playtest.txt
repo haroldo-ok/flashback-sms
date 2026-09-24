@@ -57,8 +57,8 @@ expect 0xC023 == 107
 expect 0xC015 == 26
 expect 0xC007 == 47901
 expect 0xC025 == 255
-expect 0xC017 == 67
-expect 0xC009 == 48614
+expect 0xC017 == 68
+expect 0xC009 == 48975
 expect 0xC027 == 176
 expect 0xC019 == 43
 expect 0xC00B == 41147

@@ -16,6 +16,7 @@
 #include "data_index.h"
 #include "pge.h"
 #include "logic.h"
+#include "psg.h"
 
 #define OBJECT_SIZE      18
 #define OBJECTS_PER_BANK 910
@@ -420,7 +421,14 @@ static void inv_update(unsigned char p1, unsigned char p2)
     }
 }
 
+static int col_test_b(LivePGE *pge, int num, unsigned char mode, int b_arg);
+
 static int col_test(LivePGE *pge, int num, unsigned char mode)
+{
+    return col_test_b(pge, num, mode, 0);
+}
+
+static int col_test_b(LivePGE *pge, int num, unsigned char mode, int b_arg)
 {
     unsigned char slot = pge->collision_slot, slot_bak, cs;
     unsigned char other, guard = 0, guard2;
@@ -441,10 +449,29 @@ static int col_test(LivePGE *pge, int num, unsigned char mode)
                 unsigned char ot = init_field8(other, 18);   /* object_type */
                 if (num == 10) { if (ot == 10 && pge_live[other].life >= 0) return 1; }
                 else if (ot == (unsigned char)num) return 1;
-            } else {                               /* collideTestByIndex */
+            } else if (mode == 2) {                /* collideTestByIndex */
                 if (other != pge->index) {
                     msg_send(pge->index, other, (unsigned char)num);
                     s_compare_var1 = 0xFFFF;
+                }
+            } else if (mode == 5) {                /* by animation Y, of a type */
+                /* unlike the plain by-animation test, the engine does NOT
+                 * skip the object itself here */
+                if (init_field8(other, 18) == (unsigned char)b_arg) {
+                    const unsigned char *rec = map_ani(pge_live[other].obj_type);
+                    if (rec[3] == (unsigned char)num) return 1;
+                }
+            } else if (mode == 6) {                /* anything that is not me */
+                if (other != pge->index) return 1;
+            } else {                               /* same (3) / different (4) facing */
+                if (other != pge->index) {
+                    unsigned char same = ((pge_live[other].flags & 1) == (pge->flags & 1));
+                    if (same == (mode == 3)) {
+                        s_compare_var1 = 1;
+                        /* the engine sends this FROM the object running the
+                         * test TO the one it collided with, not the reverse */
+                        msg_send(pge->index, other, (unsigned char)num);
+                    }
                 }
             }
             if (other == pge->index) slot = col_index[cs];
@@ -1049,6 +1076,50 @@ static int exec_op(unsigned char op, LivePGE *pge, int a, int b)
     }
     case 0x64:                                    /* gun shot */
         return col_detect_gun_hit(pge, a, b, 1);
+    case 0x3C:                                    /* collide by animation Y, of a type */
+        return col_test_b(pge, a, 5, b) ? 1 : 0;
+    case 0x45:                                    /* collide by object number */
+        return col_test(pge, a, 6) ? 1 : 0;
+    case 0x74:                                    /* collides4u */
+        return col_get_grid_data(pge, 4, -a) ? 0xFFFF : 0;
+    case 0x75:                                    /* doesNotCollide4u */
+        return col_get_grid_data(pge, 4, -a) ? 0 : 0xFFFF;
+    case 0x7A:                                    /* collides2u1u */
+        if (col_get_grid_data(pge, 1, -a) == 0 && col_get_grid_data(pge, 2, -(a + 1)))
+            return 0xFFFF;
+        return 0;
+    case 0x46:                                    /* collide, facing the other way */
+        s_compare_var1 = 0;
+        col_test(pge, a, 4);
+        return s_compare_var1;
+    case 0x47:                                    /* collide, facing the same way */
+        s_compare_var1 = 0;
+        col_test(pge, a, 3);
+        return s_compare_var1;
+    case 0x65: {                                  /* addToCredits */
+        unsigned char who = (unsigned char)init_field16(pge->index, I_DATA + 2 * (a & 3));
+        int val = (int)init_field16(pge->index, I_DATA + 2 * ((a & 3) + 1));
+        if (!bad_pge(who)) pge_live[who].life += val;
+        return 1;
+    }
+    case 0x68:                                    /* setCollisionState2 */
+        return col_update_state(pge, (unsigned char)a, 2);
+    case 0x76: {                                  /* isBelowConrad */
+        signed char r = (signed char)pge->room_location;
+        if (pge_live[0].room_location == pge->room_location)
+            return (div72(pge_live[0].pos_y - 8) < div72(pge->pos_y)) ? 0xFFFF : 0;
+        if (r >= 0 && r < 0x40 && pge_live[0].room_location == (unsigned char)ct_s(CT_UP + r))
+            return 0xFFFF;
+        return 0;
+    }
+    case 0x77: {                                  /* isAboveConrad */
+        signed char r = (signed char)pge->room_location;
+        if (pge_live[0].room_location == pge->room_location)
+            return (div72(pge_live[0].pos_y - 8) > div72(pge->pos_y)) ? 0xFFFF : 0;
+        if (r >= 0 && r < 0x40 && pge_live[0].room_location == (unsigned char)ct_s(CT_DOWN + r))
+            return 0xFFFF;
+        return 0;
+    }
     case 0x83: {                                  /* hasInventoryItem */
         unsigned char it = inv_cur_get(0);
         while (it != 0xFF) {
@@ -1065,9 +1136,11 @@ static int exec_op(unsigned char op, LivePGE *pge, int a, int b)
         if (other != 0xFF) msg_send(pge->index, other, (unsigned char)a);
         return 0;
     }
-    case 0x7D:                                    /* playSound (no audio yet) */
+    case 0x7D:                                    /* playSound */
+        sfx_play((unsigned char)a);
         return 0xFFFF;
-    case 0x87:                                    /* playSoundGroup (no audio yet) */
+    case 0x87:                                    /* playSoundGroup */
+        sfx_play((unsigned char)init_field16(pge->index, I_DATA + 2 * (a & 3)));
         return 0xFFFF;
     default:
         /* An opcode that is not ported yet stops the verification harness, so

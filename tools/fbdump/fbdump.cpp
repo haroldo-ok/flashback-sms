@@ -551,6 +551,25 @@ int main(int argc, char *argv[]) {
 		g_spriteHook = 0;
 		fclose(g_traceOut);
 		g_traceOut = 0;
+	} else if (!strcmp(mode, "sfx")) {
+		/* the sampled sound effects, for approximating on the PSG */
+		mkdirp(out);
+		g->_res.load_FIB("GLOBAL");
+		char path[512];
+		snprintf(path, sizeof(path), "%s/sfx.bin", out);
+		FILE *fp = fopen(path, "wb");
+		uint16_t n = g->_res._numSfx;
+		fwrite(&n, 2, 1, fp);
+		for (int i = 0; i < n; ++i) {
+			const SoundFx *sfx = &g->_res._sfxList[i];
+			uint32_t len = sfx->data ? sfx->len : 0;
+			uint16_t freq = sfx->data ? sfx->freq : 0;
+			fwrite(&len, 4, 1, fp);
+			fwrite(&freq, 2, 1, fp);
+			if (len) fwrite(sfx->data, 1, len, fp);
+		}
+		fclose(fp);
+		printf("sound effects: %d entries\n", n);
 	} else if (!strcmp(mode, "menutext")) {
 		/* The title screen's text is part of its picture, so the level select
 		 * needs its own: five strips reading LEVEL 1..5, drawn with the game's
@@ -654,6 +673,58 @@ int main(int argc, char *argv[]) {
 		fclose(g_traceOut);
 		g_traceOut = 0;
 		printf("animation frames rendered: %d\n", written);
+	} else if (!strcmp(mode, "script")) {
+		/* Play a level from its own start with a SCRIPTED key sequence (one
+		 * mask byte per game frame) and trace every frame, so the port can
+		 * be checked against the engine on inputs we choose - a lift ride, a
+		 * gun draw - not only on the recorded demo. */
+		if (argc < 6) error("script needs OUT LEVEL SCRIPTFILE");
+		mkdirp(out);
+		const int lvl = atoi(argv[4]);
+		FILE *sf = fopen(argv[5], "rb");
+		if (!sf) error("cannot open script '%s'", argv[5]);
+		static uint8_t keys[65536];
+		const int nkeys = (int)fread(keys, 1, sizeof(keys), sf);
+		fclose(sf);
+		g_traceOps = -1;
+		g->_demoBin = 0;                     /* drive input from our buffer */
+		g->_res._dem = keys;
+		g->_res._demLen = nkeys;
+		g->_skillLevel = 1;
+		g->_currentLevel = lvl;
+		g->_randSeed = 0;
+		g->_vid.setTextPalette();
+		g->_vid.setPalette0xF();
+		g->_score = 0;
+		g->clearStateRewind();
+		g->loadLevelData();
+		g->resetGameState();
+		/* undo the demo's start position: begin where the level itself does */
+		LivePGE *c = &g->_pgeLive[0];
+		c->room_location = g->_res._pgeInit[0].init_room;
+		c->pos_x = g->_res._pgeInit[0].pos_x;
+		c->pos_y = g->_res._pgeInit[0].pos_y;
+		g->_currentRoom = c->room_location;
+		g->loadLevelRoom();
+		g->_endLoop = false;
+		char path[512];
+		snprintf(path, sizeof(path), "%s/trace_S%d.fbt", out, lvl);
+		g_traceOut = fopen(path, "wb");
+		fwrite("FBT1", 1, 4, g_traceOut);
+		g_dumpStub = stub;
+		g_spriteHook = tracePiece;
+		g_frameHook = traceFrame;
+		g_traceFrame = 0;
+		while (!stub->_pi.quit && !g->_endLoop) {
+			g->mainLoop();
+			if (g->_inp_demPos >= g->_res._demLen) break;
+		}
+		g_spriteHook = 0;
+		fclose(g_traceOut);
+		g_traceOut = 0;
+		printf("script on level %d: %u frames traced, start room %d x %d y %d\n", lvl,
+		       g_traceFrame, g->_res._pgeInit[0].init_room, g->_res._pgeInit[0].pos_x,
+		       g->_res._pgeInit[0].pos_y);
 	} else if (!strcmp(mode, "replay")) {
 		/* run one of the game's own recorded demos and trace every frame */
 		if (argc < 5) error("replay needs OUT DEMOINDEX [MAXFRAMES]");

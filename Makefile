@@ -9,14 +9,14 @@ SELF_TEST ?= 0
 TEST_NO_INVENTORY ?= 0
 CFLAGS := -mz80 -I$(DEVKIT)/include -Igen -Isrc --peep-file $(DEVKIT)/include/peep-rules.txt --max-allocs-per-node 20000 -DSELF_TEST=$(SELF_TEST) -DTEST_NO_INVENTORY=$(TEST_NO_INVENTORY)
 LDFLAGS:= -mz80 --no-std-crt0 --data-loc 0xC000
-OBJS   := build/main.rel build/fmv.rel build/room.rel build/pge.rel build/logic.rel build/sim.rel build/tiledec.rel build/data_index.rel
+OBJS   := build/main.rel build/fmv.rel build/room.rel build/pge.rel build/logic.rel build/sim.rel build/tiledec.rel build/psg.rel build/data_index.rel
 DEMO   ?= demo/DATA
 DICT_MERGE ?= 0      # 0 = no tile merging: flat-shaded polygons suffer from it      # merge cutscene tiles differing in <= N pixels (saves ~530 KB)
 CAP    ?= capture
 
 all: flashback.sms
 
-build/%.rel: src/%.c gen/data_index.h src/fmv.h src/room.h src/pge.h src/logic.h src/sim.h src/tiledec.h
+build/%.rel: src/%.c gen/data_index.h src/fmv.h src/room.h src/pge.h src/logic.h src/sim.h src/tiledec.h src/psg.h
 	@mkdir -p build; $(CC) $(CFLAGS) -c $< -o $@
 build/data_index.rel: gen/data_index.c gen/data_index.h
 	@mkdir -p build; $(CC) $(CFLAGS) -c $< -o $@

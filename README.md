@@ -169,10 +169,22 @@ and the Z80 rebuilds each tile exactly before uploading it.  That takes 46% off
 the cutscene tiles, 31% off rooms and 33% off sprites.  The cutscene dictionary
 is the reason it fits at all.
 
+Level 2 has 256 objects and the live table holds 255 (0xFF means "none" in
+every 8-bit index).  Its 256th is the per-level controller object (node 0xE5,
+in the off-map room 64) that other scripts rely on - drawing the gun among
+them - so dropping it broke the gun on level 2 only.  An object whose skill is
+above the level being played is never loaded, so the controller now moves into
+the highest such free slot (245).  Verified against the original engine with a
+scripted run: 170 frames of "stand, then draw the gun" on level 2 match exactly.
+
+Scripted runs: `fbdump DATA script OUT LEVEL KEYFILE` plays a level from its own
+start with a chosen key sequence through the original engine and traces it,
+and `make SELF_TEST=1` with that trace packed (`--logic ... --logic-level N`)
+checks the port against it frame by frame.
+
 What did not fit: the second and third parts of the game intro and level 4's
 36-second approach - the three longest clips - so the intro is the logos, and
-the mission briefings and ending are out.  Level 2 has 256 objects and the live
-table holds 255, so its last object is not simulated.
+the mission briefings and ending are out.  
 
 ## The demo build
 The default build is a self-contained demo of level 1:
@@ -199,9 +211,43 @@ The default build is a self-contained demo of level 1:
 
 The whole thing is 2.7 MB (a 4 MB ROM image).
 
+## Script coverage
+98-99% of the script steps in every level part are ported opcodes.  What is
+left is mostly level-specific machinery; an unported step is skipped, so a
+script keeps running rather than stopping.  Level 2's lift needed
+isBelowConrad/isAboveConrad, the two collide-by-facing tests, addToCredits,
+setCollisionState2 and the collide-by-type/number tests.
+
+## Sound
+The PSG has three square voices and one noise voice, and the game's audio is
+MIDI music plus sampled effects, so both are re-created rather than copied:
+
+* **Music** (`tools/midiconv.py`): the MIDI score is reduced to the three tone
+  voices - at each frame the three loudest sounding notes hold the voices, and
+  a note keeps the voice it already has so lines do not jump - with percussion
+  on the noise voice.  The result is a 60 Hz stream of ready-made PSG bytes,
+  about 0.5 KB per track.  Cutscenes use the score the game itself assigns
+  them (the engine's own cutscene-to-music table) and the title has the menu
+  theme.  Only the 11 tracks this build can reach are packed; the other slots
+  are silent.
+* **Sound effects** (`tools/sfxconv.py`): each sampled effect is analysed -
+  how noisy it is, its pitch, and its loudness envelope - and re-created as a
+  tone or a noise burst with the same shape in time.  56 of the game's 66
+  effects convert; the rest are empty in the data.  They play on the third
+  voice and the noise voice, and the score's writes to those two are dropped
+  while an effect sounds.
+
+Effects are triggered by the game's own sound opcodes, so they are as frequent
+as the original's scripts make them: level 1 asks for sound six times in its
+whole script, and one of those (the gun being drawn) has no sample even in the
+original.
+
 ## Playing it
 From the title screen any button starts the game.  The d-pad moves, button 2
-is the action key, button 1 is the run key, both together are the third key,
+is the action key, button 1 is the run key, both together are the third key
+(the "use" key: lifts and other machinery are worked with it plus up/down -
+the scripts compare the whole key mask, so exactly one modifier is sent at a
+time),
 and the console's PAUSE button returns to the title.
 
 The input goes through the engine's own `pge_getInput`, which never sees a

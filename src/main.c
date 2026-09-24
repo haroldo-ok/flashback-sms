@@ -16,6 +16,7 @@
 #include "pge.h"
 #include "logic.h"
 #include "sim.h"
+#include "psg.h"
 
 #define ST_CUTSCENE 0
 #define ST_TITLE    1
@@ -106,6 +107,9 @@ static void enter_title(void)
     hide_sprites();
     if (idx != 0xFF) room_load(idx);
     SMS_setBGScrollY(0);
+#if HAS_MUSIC
+    music_play(TITLE_MUSIC);           /* the menu theme */
+#endif
 #if HAS_MENU
     SMS_mapROMBank(MENU_BANK);
     SMS_loadTiles((const unsigned char *)MENU_ADDR, 0, MENU_NTILES * 32);
@@ -119,6 +123,12 @@ static void enter_title(void)
 static void play_clip(unsigned char clip)
 {
     skip_prev = 0xFFFF;              /* a button held from the menu is not a press */
+#if HAS_MUSIC
+    {   /* the score the game itself uses for this cutscene */
+        unsigned char id = fmv_clip_id[clip];
+        music_play(id < CUT_MUSIC_COUNT ? cut_music[id] : NO_MUSIC);
+    }
+#endif
     fmv_start(clip);
     game_state = ST_CUTSCENE;
 }
@@ -142,6 +152,7 @@ static void clip_finished(void)
     fmv_stop();
     if (return_to_sim) {            /* back to the game that triggered it */
         return_to_sim = 0;
+        music_stop();               /* the cutscene's score ends with it */
         sim_resume();
         game_state = ST_SIM;
         return;
@@ -190,7 +201,7 @@ void main(void)
             pge_loaded = l + 1;
         }
 #if HAS_LOGIC
-        logic_start(0);
+        logic_start(LOGIC_LEVEL);
         while (logic_step()) { }
 #endif
     }
@@ -207,6 +218,8 @@ void main(void)
     for (;;) {
         watchdog = 0;
         SMS_waitForVBlank();
+        music_frame();                 /* one 60 Hz step of the score */
+        sfx_frame();
         keys = SMS_getKeysStatus();
         pressed = SMS_getKeysPressed();
 

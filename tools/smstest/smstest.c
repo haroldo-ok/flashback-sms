@@ -10,6 +10,7 @@
  *   symbols <file.noi>          load NoICE symbols (DEF _name 0xADDR)
  *   hold <btn[+btn...]|none>    set held pad buttons (up,down,left,right,1,2)
  *   pause                       press the console's PAUSE button (an NMI)
+ *   psglog <file> / psgstop     record sound chip writes (frame, byte)
  *   tap <btns>                  hold for 2 frames, then release
  *   run <n>                     run n frames
  *   waituntil <sym> <op> <val> <maxframes> [w1|w2|s16]
@@ -48,6 +49,8 @@ static uint8_t vdp_line_pending;    /* line irq flag */
 static uint8_t line_counter;
 static int cur_line;
 static uint8_t pad1_state = 0xFF;   /* active low: U D L R B1 B2 */
+static FILE* psg_log = NULL;        /* sound chip writes, for checking music */
+static unsigned long psg_writes = 0;
 
 static z80 cpu;
 static unsigned long frame_no;
@@ -118,7 +121,13 @@ static uint8_t port_in(z80* z, uint8_t port) {
 }
 static void port_out(z80* z, uint8_t port, uint8_t val) {
     (void)z;
-    if (port >= 0x40 && port < 0x80) return;              /* PSG */
+    if (port >= 0x40 && port < 0x80) {                    /* PSG */
+        if (psg_log) {
+            fprintf(psg_log, "%lu %02X\n", frame_no, val);
+            psg_writes++;
+        }
+        return;
+    }
     if (port >= 0x80 && port < 0xC0) {
         if (port & 1) vdp_ctrl_write(val); else vdp_data_write(val);
     }
@@ -420,6 +429,14 @@ int main(int argc, char** argv) {
         else if (!strcmp(c1, "screenshot") && n >= 2) render_screenshot(c2);
         else if (!strcmp(c1, "dumpstate") && n >= 2) dump_state(c2);
         else if (!strcmp(c1, "pause")) { z80_gen_nmi(&cpu); run_frame(); printf("pause (frame %lu)\n", frame_no); }
+        else if (!strcmp(c1, "psglog") && n >= 2) {
+            psg_log = fopen(c2, "w");
+            printf("psglog: %s (frame %lu)\n", c2, frame_no);
+        }
+        else if (!strcmp(c1, "psgstop")) {
+            if (psg_log) { fclose(psg_log); psg_log = NULL; }
+            printf("psgstop: %lu writes (frame %lu)\n", psg_writes, frame_no);
+        }
         else if (!strcmp(c1, "profstart")) { prof_reset(); profiling = 1; printf("profstart (frame %lu)\n", frame_no); }
         else if (!strcmp(c1, "profstop")) { profiling = 0; printf("profstop (frame %lu)\n", frame_no); }
         else if (!strcmp(c1, "profdump") && n >= 2) prof_dump(c2);

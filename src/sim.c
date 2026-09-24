@@ -10,6 +10,7 @@
 #include "logic.h"
 #include "room.h"
 #include "sim.h"
+#include "psg.h"
 #include "tiledec.h"
 
 #define SPR_SLOTS  24
@@ -117,6 +118,7 @@ static void load_room(unsigned char room)
 void sim_start(unsigned char level_index)
 {
     unsigned char i;
+    music_stop();                               /* no in-game score yet */
     logic_check = 0;                            /* run on past any divergence */
     logic_use_pad = 1;                          /* played, not replayed */
     logic_start(level_index);
@@ -139,9 +141,13 @@ static unsigned char pad_mask(void)
     if (k & PORT_A_KEY_DOWN)  m |= 2;
     if (k & PORT_A_KEY_LEFT)  m |= 4;
     if (k & PORT_A_KEY_RIGHT) m |= 8;
-    if (k & PORT_A_KEY_2)     m |= 0x20;        /* action / gun */
-    if (k & PORT_A_KEY_1)     m |= 0x40;        /* run */
-    if ((k & PORT_A_KEY_1) && (k & PORT_A_KEY_2)) m |= 0x10;
+    /* Exactly ONE modifier at a time: the scripts compare the whole mask, so
+     * both buttons together must mean the third key alone (0x10) - lifts and
+     * other machinery are worked with that key plus up/down.  Setting all
+     * three bits matched nothing at all. */
+    if ((k & PORT_A_KEY_1) && (k & PORT_A_KEY_2)) m |= 0x10;   /* use / third key */
+    else if (k & PORT_A_KEY_2) m |= 0x20;                      /* action, gun */
+    else if (k & PORT_A_KEY_1) m |= 0x40;                      /* run */
     return m;
 }
 

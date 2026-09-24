@@ -21,6 +21,20 @@ OBJECT_SIZE = 18
 OBJECTS_PER_BANK = 16384 // OBJECT_SIZE          # 910
 
 
+def free_slot_for_last(npges, skills, skill=1):
+    """Level 2 has 256 objects; the Z80 table holds 255 (0xFF means "none" in
+    every 8-bit index).  Its 256th is the per-level controller object (node
+    0xE5, room 64) that other scripts - drawing the gun among them - rely on,
+    so it cannot simply be dropped.  An object whose skill is above the level
+    being played is never loaded, so its slot is free: the controller moves to
+    the highest such slot, keeping it as late in the processing order as
+    possible.  Returns that slot, or None when no move is needed."""
+    if npges <= 255:
+        return None
+    free = [i for i in range(255) if skills[i] > skill]
+    return max(free) if free else None
+
+
 def read_fbl(path):
     d = open(path, 'rb').read()
     assert d[:4] == b'FBL1', path
@@ -39,10 +53,20 @@ def read_fbl(path):
     ani_size = struct.unpack_from('<I', d, p)[0]; p += 4
     ani = d[p:p + ani_size]
     skills = [pges[i * INIT_PGE_SIZE + 25] for i in range(npges)]
+    moved = free_slot_for_last(npges, skills)
+    if moved is not None:
+        k, last = moved, 255
+        rec = lambda i: pges[i * INIT_PGE_SIZE:(i + 1) * INIT_PGE_SIZE]
+        pges = pges[:k * INIT_PGE_SIZE] + rec(last) + pges[(k + 1) * INIT_PGE_SIZE:255 * INIT_PGE_SIZE]
+        for arr in (live_first, live_flags, live_life, live_room, live_anim, skills):
+            arr[k] = arr[last]
+            del arr[255:]
+        npges = 255
     return dict(npges=npges, nodes=nodes, nobjects=nobjects, pges=pges,
                 node_first=node_first, node_num=node_num, objects=objects,
                 live_first=live_first, live_flags=live_flags, live_life=live_life,
-                live_room=live_room, live_anim=live_anim, ani=ani, ct=ct, skills=skills)
+                live_room=live_room, live_anim=live_anim, ani=ani, ct=ct, skills=skills,
+                moved=moved)
 
 
 def pack_ani(ani):

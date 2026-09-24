@@ -40,15 +40,32 @@ def main():
     ap.add_argument('trace')
     ap.add_argument('--out', required=True)
     ap.add_argument('--frames', type=int, default=0)
+    ap.add_argument('--level', help='level_L*.fbl, to apply the same object move as the ROM')
     a = ap.parse_args()
+    moved = None
+    if a.level:
+        from levelconv import read_fbl
+        moved = read_fbl(a.level).get('moved')
     rows = []
     npges = 0
     for f in read_fbt(a.trace, a.frames or None):
-        npges = len(f['pges'])
-        rows.append((f['demo_input'], frame_checksum(f['pges'])))
-    start = os.path.join(os.path.dirname(a.trace),
-                         'demo_D' + os.path.basename(a.trace).split('_D')[1].split('.')[0] + '.bin')
-    sd = open(start, 'rb').read() if os.path.exists(start) else bytes(4)
+        npges = min(len(f['pges']), 255)
+        if not rows: first = f
+        # the port simulates at most 255 objects (level 2 has 256), so the
+        # expected state covers exactly the objects it runs
+        pg = list(f['pges'])
+        if moved is not None and len(pg) > 255:
+            pg[moved] = pg[255]              # the controller lives in the freed slot
+        rows.append((f['demo_input'], frame_checksum(pg[:255])))
+    base = os.path.basename(a.trace)
+    if '_S' in base:
+        # a scripted run starts where the level itself puts Conrad: frame 0
+        c = first['pges'][0]
+        sd = bytes([0, int(c[9]), int(c[0]) | (int(c[1]) << 8) & 0xFF, int(c[2]) | (int(c[3]) << 8) & 0xFF])
+    else:
+        start = os.path.join(os.path.dirname(a.trace),
+                             'demo_D' + base.split('_D')[1].split('.')[0] + '.bin')
+        sd = open(start, 'rb').read() if os.path.exists(start) else bytes(4)
     blob = struct.pack('<HH', len(rows), npges) + bytes([sd[1], sd[2], sd[3], 0])
     print(f'  demo start: room {sd[1]} x {sd[2]} y {sd[3]}')
     for inp, chk in rows:

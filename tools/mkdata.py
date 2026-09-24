@@ -306,6 +306,42 @@ def pack(a):
         menu_palette = list(mn['palette'])
         print(f'level select: {menu_ntiles} tiles + 5 strips at bank {menu_bank}')
 
+    # 6d. music: one PSG stream per track (tools/midiconv.py), each inside a
+    # single bank so the player never crosses one mid-stream
+    mus_tab = []
+    if a.music:
+        for path in a.music:
+            if path == '-':                      # slot kept, no track packed
+                mus_tab.append((0, 0))
+                continue
+            mu = pickle.load(open(path, 'rb'))
+            st = mu['stream']
+            assert len(st) <= BANK
+            if len(st) > b.room_left():
+                b.align_bank()
+            mus_tab.append((b.bank, b.addr))
+            b.data += st
+        b.align_bank()
+        print(f'music: {sum(1 for x in mus_tab if x[0])} tracks in {len(mus_tab)} slots, '
+              f'{sum(len(pickle.load(open(p_, "rb"))["stream"]) for p_ in a.music if p_ != "-")/1024:.1f} KB')
+
+    # 6e. sound effects approximated on the PSG (tools/sfxconv.py)
+    sfx_tab = []
+    if a.sfx:
+        sx = pickle.load(open(a.sfx, 'rb'))
+        top = max(sx) + 1 if sx else 0
+        for i in range(top):
+            st = sx.get(i)
+            if not st:
+                sfx_tab.append((0, 0))
+                continue
+            if len(st) > b.room_left():
+                b.align_bank()
+            sfx_tab.append((b.bank, b.addr))
+            b.data += st
+        b.align_bank()
+        print(f'sound effects: {sum(1 for x in sfx_tab if x[0])} of {top} entries')
+
     # 7. per-frame inputs + expected object state for the logic port
     logic_bank = 0
     if a.logic:
@@ -348,6 +384,18 @@ def pack(a):
         f'#define HAS_ANIM {1 if a.anim else 0}',
         f'#define HAS_SPRSETS {1 if a.sprsets else 0}',
         f'#define HAS_MENU {1 if a.menu else 0}',
+        f'#define HAS_MUSIC {1 if a.music else 0}',
+        f'#define HAS_SFX {1 if a.sfx else 0}',
+        f'#define LOGIC_LEVEL {a.logic_level}',      # the level the harness trace plays
+        f'#define LOGIC_LEVEL {a.logic_level}',     # which level the harness checks
+        f'#define NUM_SFX {len(sfx_tab)}',
+        'extern const unsigned char sfx_bank[];',
+        'extern const unsigned int sfx_addr[];',
+        f'#define NUM_MUSIC {len(mus_tab)}',
+        'extern const unsigned char music_bank[], cut_music[];',
+        '#define CUT_MUSIC_COUNT 75',
+        '#define TITLE_MUSIC 1',
+        'extern const unsigned int music_addr[];',
         'extern const unsigned char level_cutscene[];',
         f'#define MENU_BANK {menu_bank}',
         f'#define MENU_ADDR 0x{menu_addr:04X}',
@@ -400,6 +448,17 @@ def pack(a):
          arr('unsigned int', 'spr_mon_addr', [x[1] for x in spr_mon] or [0], hx4),
          arr('unsigned char', 'spr_palette', spr_palette, hx),
          arr('unsigned char', 'menu_palette', menu_palette, hx),
+         arr('unsigned char', 'music_bank', [x[0] for x in mus_tab] or [0], str),
+         arr('unsigned char', 'sfx_bank', [x[0] for x in sfx_tab] or [0], str),
+         arr('unsigned int', 'sfx_addr', [x[1] for x in sfx_tab] or [0], hx4),
+         # the engine's own cutscene -> music table (Cutscene::_musicTableDOS)
+         arr('unsigned char', 'cut_music', [
+             0x10,0x15,0x15,0xFF,0x15,0x19,0x0F,0xFF,0x15,0x04,0x15,0xFF,0xFF,0x00,0x19,0x15,
+             0x15,0x0D,0x15,0x0D,0x18,0x13,0xFF,0xFF,0xFF,0x14,0x14,0x14,0x14,0x14,0xFF,0xFF,
+             0x13,0x13,0x13,0x13,0x15,0x14,0x14,0x14,0x14,0x14,0x14,0x13,0x13,0x11,0xFF,0x03,
+             0x0E,0x13,0x12,0xFF,0x06,0x07,0x0A,0x0A,0x15,0x05,0x13,0x02,0x15,0x09,0x17,0x08,
+             0x0B,0x0C,0x14,0x14,0x14,0x14,0x14,0x14,0xFF,0xFF,0xFF], hx),
+         arr('unsigned int', 'music_addr', [x[1] for x in mus_tab] or [0], hx4),
          arr('unsigned char', 'level_cutscene',
              [{0: 0x00, 1: 0x2F, 2: 0xFF, 3: 0x34, 4: 0x39, 5: 0x35, 6: 0xFF}[n] for n in [x[0] for x in lvl_tab]] or [0xFF], hx),
          arr('unsigned char', 'level_bank_ct', [x[7] for x in lvl_tab] or [0], str),
@@ -597,7 +656,7 @@ def verify(a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('mode', choices=['pack', 'verify'])
-    ap.add_argument('--fmv'); ap.add_argument('--rooms', nargs='*'); ap.add_argument('--sprites'); ap.add_argument('--title'); ap.add_argument('--levels', nargs='*'); ap.add_argument('--logic'); ap.add_argument('--anim'); ap.add_argument('--sprsets'); ap.add_argument('--menu'); ap.add_argument('--out', default='gen')
+    ap.add_argument('--fmv'); ap.add_argument('--rooms', nargs='*'); ap.add_argument('--sprites'); ap.add_argument('--title'); ap.add_argument('--levels', nargs='*'); ap.add_argument('--logic'); ap.add_argument('--anim'); ap.add_argument('--sprsets'); ap.add_argument('--menu'); ap.add_argument('--music', nargs='*'); ap.add_argument('--sfx'); ap.add_argument('--logic-level', type=int, default=0); ap.add_argument('--out', default='gen')
     ap.add_argument('--capture', default='capture'); ap.add_argument('--png')
     ap.add_argument('--max-err', type=float, default=3.0)
     a = ap.parse_args()
