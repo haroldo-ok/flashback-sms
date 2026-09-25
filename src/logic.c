@@ -2189,7 +2189,7 @@ static void pge_process(LivePGE *pge) __naked
     or   a, l
     jr   nz, 00010$
     jr   00020$
-00015$:                         ; past this node's records
+00015$:                         ; past the records of this node
     ld   a, 18 (ix)
     call _msg_clear
     jr   00099$
@@ -2343,7 +2343,7 @@ static void logic_objects(void) __naked
     ld   hl, #_room_head
     add  hl, de
     ld   a, (hl)
-00010$:                         ; 1. the current room's list
+00010$:                         ; 1. the list of the current room
     cp   a, #0xff
     jr   z, 00020$
     ld   c, a
