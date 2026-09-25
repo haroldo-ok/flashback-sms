@@ -198,25 +198,90 @@ static unsigned int col_get_grid_pos(LivePGE *pge, int dx)
     return (unsigned int)(y * 16 + x + c * 64);
 }
 
-static int col_find_slot(unsigned int pos)
+/* the index i with col_ct_pos[col_table[i]] == pos, or -1.  In asm because
+ * SDCC kept every temporary of this loop in ix slots, ~450 cycles a step. */
+static int col_find_slot(unsigned int pos) __naked
 {
-    unsigned char i, n = col_cur_pos, lo = (unsigned char)pos & 63;
-    const unsigned char *t = col_table;
-    if (!(col_used[lo >> 3] & bit_of[lo & 7])) return -1;
-    for (i = 0; i < n; i++, t++)
-        if (col_ct_pos[*t] == pos) return i;
-    return -1;
+    (void)pos;
+    __asm
+    ex   de, hl                 ; de = pos
+    ld   a, e
+    and  a, #0x3f
+    ld   c, a
+    rrca
+    rrca
+    rrca
+    and  a, #0x07
+    ld   hl, #_col_used
+    add  a, l
+    ld   l, a
+    adc  a, h
+    sub  a, l
+    ld   h, a
+    ld   b, (hl)                ; the col_used byte
+    ld   a, c
+    and  a, #0x07
+    ld   hl, #_bit_of
+    add  a, l
+    ld   l, a
+    adc  a, h
+    sub  a, l
+    ld   h, a
+    ld   a, (hl)
+    and  a, b
+    jr   z, 00009$
+    ld   a, (_col_cur_pos)
+    or   a, a
+    jr   z, 00009$
+    ld   b, a
+    ld   c, #0
+    ld   iy, #_col_table
+00001$:
+    ld   l, 0 (iy)
+    ld   h, #0
+    add  hl, hl
+    ld   a, l
+    add  a, #<(_col_ct_pos)
+    ld   l, a
+    ld   a, h
+    adc  a, #>(_col_ct_pos)
+    ld   h, a
+    ld   a, (hl)
+    cp   a, e
+    jr   nz, 00002$
+    inc  hl
+    ld   a, (hl)
+    cp   a, d
+    jr   z, 00008$
+00002$:
+    inc  iy
+    inc  c
+    djnz 00001$
+00009$:
+    ld   de, #0xffff
+    ret
+00008$:
+    ld   e, c
+    ld   d, #0
+    ret
+    __endasm;
 }
+
+/* Loop state lives in statics: SDCC addresses those directly, while locals
+ * cost 19-cycle ix accesses and this runs for every cell of every object.
+ * cp_link is where the next cell's slot is recorded: the object's
+ * collision_slot for the first cell, the previous cell's col_index after. */
+static unsigned char cp_slot2;
+static unsigned char *cp_link;
+static unsigned int cp_pos;
 
 static void col_prepare_piege_state(LivePGE *pge)
 {
     unsigned char len = init_field8(pge->index, 28);   /* collision_data_len */
-    unsigned char slot1 = 0xFF, slot2, c, lo, idx = pge->index, prev;
-    unsigned int pos;
+    unsigned char c, lo, prev, fast_ok = 0;
     int found;
-    int x = pge->pos_x;
+    int x;
     unsigned int fast_row = 0;
-    unsigned char fast_ok = 0;
     if (len == 0) { pge->collision_slot = 0xFF; return; }
     if ((signed char)pge->room_location >= 0 && pge->pos_y >= 0 && pge->pos_y < 216) {
         int row = div72(pge->pos_y - 8);
@@ -225,62 +290,53 @@ static void col_prepare_piege_state(LivePGE *pge)
             fast_ok = 1;
         }
     }
+    cp_link = &pge->collision_slot;
+    x = pge->pos_x;
     for (c = 0; c < len; c++, x += 0x10) {
         if (col_cur_slot >= COL_SLOTS) return;
-        slot2 = col_cur_slot++;
+        cp_slot2 = col_cur_slot++;
         /* the slots of an object step one grid cell at a time, so the common
          * case is the previous cell plus one: only fall back to the full
          * computation when the object straddles a room edge */
-        if (fast_ok && x >= 0 && x < 256) {
-            pos = fast_row + ((unsigned int)(x + 8) >> 4);
+        if (fast_ok && (unsigned int)x < 256) {
+            cp_pos = fast_row + (((unsigned int)x + 8) >> 4);
         } else {
-            pos = col_get_grid_pos(pge, (int)c << 4);
+            cp_pos = col_get_grid_pos(pge, (int)c << 4);
+            if (cp_pos == 0xFFFF) { *cp_link = 0xFF; return; }
         }
-        if (pos == 0xFFFF) {
-            if (slot1 == 0xFF) pge->collision_slot = 0xFF;
-            else col_index[slot1] = 0xFF;
-            return;
-        }
-        col_ct_pos[slot2] = pos;
-        col_live[slot2] = idx;
-        col_index[slot2] = 0xFF;
-        found = col_find_slot(pos);
+        col_ct_pos[cp_slot2] = cp_pos;
+        col_live[cp_slot2] = pge->index;
+        col_index[cp_slot2] = 0xFF;
+        found = col_find_slot(cp_pos);
         if (found >= 0) {
-            prev = col_table[found];
-            col_prev[slot2] = prev;
-            col_table[found] = slot2;
-            if (slot1 == 0xFF) pge->collision_slot = (unsigned char)found;
-            else col_index[slot1] = (unsigned char)found;
+            prev = col_table[(unsigned char)found];
+            col_prev[cp_slot2] = prev;
+            col_table[(unsigned char)found] = cp_slot2;
+            *cp_link = (unsigned char)found;
             if (pge->flags & 0x80) pge->flags |= 4;
             if (prev != 0xFF) {
                 LivePGE *o = &pge_live[col_live[prev]];
                 if (o->flags & 0x80) o->flags |= 4;
             }
         } else {
-            col_prev[slot2] = 0xFF;
+            col_prev[cp_slot2] = 0xFF;
             if (col_cur_pos >= COL_SLOTS) return;
-            col_table[col_cur_pos] = slot2;
-            lo = (unsigned char)pos & 63;
+            col_table[col_cur_pos] = cp_slot2;
+            lo = (unsigned char)cp_pos & 63;
             col_used[lo >> 3] |= bit_of[lo & 7];
             if (col_cur_pos > col_peak_pos) col_peak_pos = col_cur_pos;
             if (col_cur_slot > col_peak_slot) col_peak_slot = col_cur_slot;
-            if (slot1 == 0xFF) pge->collision_slot = col_cur_pos;
-            else col_index[slot1] = col_cur_pos;
+            *cp_link = col_cur_pos;
             col_cur_pos++;
         }
-        slot1 = slot2;
+        cp_link = &col_index[cp_slot2];
     }
 }
 
 static void col_prepare_room_state(void)
 {
-    unsigned char i, room;
     col_left_room = (unsigned char)ct_s(CT_LEFT + s_room);
     col_right_room = (unsigned char)ct_s(CT_RIGHT + s_room);
-    for (i = 0; i < col_cur_pos; i++) {
-        room = (unsigned char)(col_ct_pos[col_table[i]] / 64);
-        (void)room;      /* the active-slot map is only needed by opcodes not ported yet */
-    }
 }
 
 /* the collision grid value next to an object */
