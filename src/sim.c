@@ -448,6 +448,39 @@ static void unhide_items(unsigned char idx, unsigned char room)
     }
 }
 
+/* The camera.  The room is 224 lines and the screen 192, so the view scrolls
+ * by up to ROOM_SCROLL_MAX.  It follows the floor Conrad is on (the engine
+ * stands characters at y 70, 142 and 214), not his pos_y: that moves with
+ * every animation frame's own offset - walking bobs, stepping down a ledge
+ * rises before it drops - and following it made the screen jitter.  The
+ * floor only changes once he is well away from it, and the view then glides
+ * there; a new room starts at its target at once. */
+#define CAM_STEP 2                      /* lines per game tick */
+static int cam_floor;
+static unsigned char cam_snap;
+
+static int nearest_floor(int y)
+{
+    if (y < 106) return 70;
+    if (y < 178) return 142;
+    return 214;
+}
+
+static void update_scroll(void)
+{
+    int y = pge_live[0].pos_y, target;
+    if (cam_snap || y < cam_floor - 48 || y > cam_floor + 48) cam_floor = nearest_floor(y);
+    target = cam_floor - 120;
+    if (target < 0) target = 0;
+    if (target > ROOM_SCROLL_MAX) target = ROOM_SCROLL_MAX;
+    if (cam_snap) sim_scroll = (unsigned char)target;
+    else if (sim_scroll + CAM_STEP <= target) sim_scroll += CAM_STEP;
+    else if (sim_scroll >= target + CAM_STEP) sim_scroll -= CAM_STEP;
+    else sim_scroll = (unsigned char)target;
+    cam_snap = 0;
+    SMS_setBGScrollY(sim_scroll);
+}
+
 static void load_room(unsigned char room)
 {
     unsigned char idx = room_find(part_map[logic_level], room);
@@ -458,6 +491,7 @@ static void load_room(unsigned char room)
     SMS_loadSpritePalette(spr_palette);
     SMS_displayOn();
     sim_room = room;
+    cam_snap = 1;
     for (idx = 0; idx < SPR_SLOTS; idx++) { slot_tile[idx] = 0xFFFF; slot_bot[idx] = 0xFFFF; }
 }
 
@@ -511,17 +545,11 @@ void sim_resume(void)
 void sim_step(void)
 {
     unsigned char n, k;
-    int y;
 
     logic_pad_mask = pad_mask();
     logic_step();
     if (logic_cur_room != sim_room) load_room(logic_cur_room);
-
-    y = pge_live[0].pos_y - 120;
-    if (y < 0) y = 0;
-    if (y > ROOM_SCROLL_MAX) y = ROOM_SCROLL_MAX;
-    sim_scroll = (unsigned char)y;
-    SMS_setBGScrollY(sim_scroll);
+    update_scroll();
 
     for (k = 0; k < SPR_SLOTS; k++) slot_used[k] = 0;
     SMS_initSprites();
