@@ -64,6 +64,7 @@ unsigned int  logic_expected;
 
 static unsigned char s_bank_a, s_bank_obj, s_bank_aniidx, s_bank_ani, s_bank_logic;
 static unsigned int  s_total_frames;
+static unsigned int  s_node_tab;       /* part A: the per-node first-object table */
 unsigned char logic_cur_room;
 unsigned char logic_level;
 unsigned char col_peak_pos, col_peak_slot, msg_peak, ov_peak;       /* level part being played (0..6) */
@@ -494,38 +495,56 @@ static unsigned int rd16(const unsigned char *p)
     return (unsigned int)p[0] | ((unsigned int)p[1] << 8);
 }
 
+/* Script walks read consecutive records, so keep the position of the last one
+ * and step from it instead of recomputing bank and offset (a 16-bit multiply). */
+static unsigned int  ro_n, ro_k;
+static unsigned char ro_bank, ro_valid;
+static const unsigned char *ro_p;
+
 static void read_object(unsigned int n, Obj *o)
 {
     const unsigned char *p;
-    unsigned char bank = s_bank_obj;
-    while (n >= OBJECTS_PER_BANK) { n -= OBJECTS_PER_BANK; bank++; }
-    SMS_mapROMBank(bank);
-    p = (const unsigned char *)(0x8000 + n * OBJECT_SIZE);
-    o->type = rd16(p);
+    if (ro_valid && n == ro_n + 1) {
+        if (++ro_k == OBJECTS_PER_BANK) { ro_k = 0; ro_bank++; ro_p = (const unsigned char *)0x8000; }
+        else ro_p += OBJECT_SIZE;
+    } else if (!ro_valid || n != ro_n) {
+        unsigned int k = n;
+        unsigned char bank = s_bank_obj;
+        while (k >= OBJECTS_PER_BANK) { k -= OBJECTS_PER_BANK; bank++; }
+        ro_k = k;
+        ro_bank = bank;
+        ro_p = (const unsigned char *)(0x8000 + k * OBJECT_SIZE);
+        ro_valid = 1;
+    }
+    ro_n = n;
+    SMS_mapROMBank(ro_bank);
+    p = ro_p;
+    /* the Z80 is little-endian and has no alignment rules: load words directly */
+    o->type = *(const unsigned int *)p;
     o->dx = (signed char)p[2];
     o->dy = (signed char)p[3];
-    o->init_obj_type = rd16(p + 4);
+    o->init_obj_type = *(const unsigned int *)(p + 4);
     o->opcode2 = p[6];
     o->opcode1 = p[7];
     o->flags = p[8];
     o->opcode3 = p[9];
-    o->init_obj_number = rd16(p + 10);
-    o->arg1 = (int)rd16(p + 12);
-    o->arg2 = (int)rd16(p + 14);
-    o->arg3 = (int)rd16(p + 16);
+    o->init_obj_number = *(const unsigned int *)(p + 10);
+    o->arg1 = *(const int *)(p + 12);
+    o->arg2 = *(const int *)(p + 14);
+    o->arg3 = *(const int *)(p + 16);
 }
 
 /* an object's InitPGE field (part A bank) */
 static unsigned int init_field16(unsigned char idx, unsigned char off)
 {
     SMS_mapROMBank(s_bank_a);
-    return rd16((const unsigned char *)(0x8002 + idx * INIT_PGE_SIZE + off));
+    return *(const unsigned int *)(0x8002 + (((unsigned int)idx << 5) - idx) + off);
 }
 
 static unsigned char init_field8(unsigned char idx, unsigned char off)
 {
     SMS_mapROMBank(s_bank_a);
-    return *(const unsigned char *)(0x8002 + idx * INIT_PGE_SIZE + off);
+    return *(const unsigned char *)(0x8002 + (((unsigned int)idx << 5) - idx) + off);
 }
 
 /* animation record for an object type: header + the frame for a sequence */
@@ -535,9 +554,9 @@ static const unsigned char *map_ani(unsigned int obj_type)
     unsigned char bank;
     const unsigned char *rec;
     SMS_mapROMBank(s_bank_aniidx);
-    e = (const unsigned char *)(0x8000 + obj_type * 3);
+    e = (const unsigned char *)(0x8000 + (obj_type << 1) + obj_type);
     bank = e[0];
-    rec = (const unsigned char *)rd16(e + 1);
+    rec = (const unsigned char *)*(const unsigned int *)(e + 1);
     SMS_mapROMBank(s_bank_ani + bank);
     return rec;
 }
@@ -597,8 +616,8 @@ static unsigned int col_hit_helper(unsigned char other, int msg_num)
     Obj obj;
     node = init_field16(other, I_NODE);
     SMS_mapROMBank(s_bank_a);
-    first = rd16((const unsigned char *)(0x8002 + pge_total * INIT_PGE_SIZE + node * 2));
-    count = rd16((const unsigned char *)(0x8002 + pge_total * INIT_PGE_SIZE + 512 + node * 2));
+    first = rd16((const unsigned char *)(s_node_tab + node * 2));
+    count = rd16((const unsigned char *)(s_node_tab + 512 + node * 2));
     i = pge_live[other].first_obj;
     while (i < count) {
         read_object(first + i, &obj);
@@ -1294,7 +1313,7 @@ static void pge_message_ack(LivePGE *pge)
 
     node = init_field16(pge->index, I_NODE);
     SMS_mapROMBank(s_bank_a);
-    first = rd16((const unsigned char *)(0x8002 + pge_total * INIT_PGE_SIZE + node * 2));
+    first = rd16((const unsigned char *)(s_node_tab + node * 2));
     i = first + pge->first_obj;
     for (guard = 0; guard < 4000; guard++) {   /* never spin on unreadable data */
         read_object(i, &obj);
@@ -1348,7 +1367,7 @@ static void pge_process(LivePGE *pge)
     if (seq_count <= pge->anim_seq) {
         node = init_field16(pge->index, I_NODE);
         SMS_mapROMBank(s_bank_a);
-        first = rd16((const unsigned char *)(0x8002 + pge_total * INIT_PGE_SIZE + node * 2));
+        first = rd16((const unsigned char *)(s_node_tab + node * 2));
         first += pge->first_obj;
         for (guard = 0; guard < 4000; guard++) {
             read_object(first, &obj);
@@ -1389,6 +1408,8 @@ void logic_start(unsigned char level_index)
     s_bank_logic = LOGIC_BANK;
     logic_level = level_num[level_index];     /* which level part is running */
     pge_load_level(level_index);
+    s_node_tab = 0x8002 + pge_total * INIT_PGE_SIZE;
+    ro_valid = 0;
     SMS_mapROMBank(s_bank_logic);
     s_total_frames = rd16((const unsigned char *)0x8000);
     /* the engine moves Conrad to the demo's start point when replaying a demo;
