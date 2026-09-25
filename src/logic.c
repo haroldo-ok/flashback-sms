@@ -18,6 +18,20 @@
 #include "logic.h"
 #include "psg.h"
 
+/* the asm routines below hard-code these LivePGE offsets (16-bit ints) */
+#ifdef __SDCC
+#define LAYOUT_CHECK(name, cond) typedef char name[(cond) ? 1 : -1]
+#else
+#define LAYOUT_CHECK(name, cond) typedef char name[1]
+#endif
+LAYOUT_CHECK(lp_size,  sizeof(LivePGE) == 19);
+LAYOUT_CHECK(lp_type,  __builtin_offsetof(LivePGE, obj_type) == 0);
+LAYOUT_CHECK(lp_x,     __builtin_offsetof(LivePGE, pos_x) == 2);
+LAYOUT_CHECK(lp_y,     __builtin_offsetof(LivePGE, pos_y) == 4);
+LAYOUT_CHECK(lp_anim,  __builtin_offsetof(LivePGE, anim_number) == 6);
+LAYOUT_CHECK(lp_seq,   __builtin_offsetof(LivePGE, anim_seq) == 14);
+LAYOUT_CHECK(lp_flags, __builtin_offsetof(LivePGE, flags) == 17);
+
 #define OBJECT_SIZE      18
 #define OBJECTS_PER_BANK 910
 #define INIT_PGE_SIZE    31
@@ -267,70 +281,287 @@ static int col_find_slot(unsigned int pos) __naked
     __endasm;
 }
 
-/* Loop state lives in statics: SDCC addresses those directly, while locals
- * cost 19-cycle ix accesses and this runs for every cell of every object.
- * cp_link is where the next cell's slot is recorded: the object's
- * collision_slot for the first cell, the previous cell's col_index after. */
-static unsigned char cp_slot2;
-static unsigned char *cp_link;
-static unsigned int cp_pos;
+#if COL_SLOTS != 160
+#error col_prepare_piege_state below hard-codes 160 collision slots
+#endif
+LAYOUT_CHECK(lp_room,  __builtin_offsetof(LivePGE, room_location) == 15);
+LAYOUT_CHECK(lp_cslot, __builtin_offsetof(LivePGE, collision_slot) == 16);
+LAYOUT_CHECK(lp_index, __builtin_offsetof(LivePGE, index) == 18);
 
-static void col_prepare_piege_state(LivePGE *pge)
+/* pge_prepareCollisionState for one object: record each of its
+ * collision_data_len cells (one grid cell apart, left to right) in a slot,
+ * chaining slots that share a cell.  In asm - it runs for every cell of every
+ * object each frame and SDCC's version was ~4k cycles a call.  Step by step:
+ *   len = init_field8(index, 28); if (!len) { collision_slot = 0xFF; return; }
+ *   fast = room >= 0 && 0 <= pos_y < 216 && (row = div72(pos_y - 8)) in 0..2
+ *   link = &collision_slot; x = pos_x
+ *   per cell c:  if (col_cur_slot >= 160) return;  slot2 = col_cur_slot++
+ *     pos = fast && 0 <= x < 256 ? row * 16 + room * 64 + ((x + 8) >> 4)
+ *                                : col_get_grid_pos(pge, c * 16)
+ *     if (pos == 0xFFFF) { *link = 0xFF; return; }
+ *     col_ct_pos[slot2] = pos; col_live[slot2] = index; col_index[slot2] = 0xFF
+ *     if ((f = col_find_slot(pos)) >= 0) {
+ *         prev = col_table[f]; col_prev[slot2] = prev; col_table[f] = slot2
+ *         *link = f; if (flags & 0x80) flags |= 4
+ *         if (prev != 0xFF && (pge_live[col_live[prev]].flags & 0x80)) ... |= 4
+ *     } else {
+ *         col_prev[slot2] = 0xFF; if (col_cur_pos >= 160) return
+ *         col_table[col_cur_pos] = slot2; mark pos & 63 in col_used
+ *         update the peaks; *link = col_cur_pos++
+ *     }
+ *     link = &col_index[slot2]; x += 16                                    */
+static unsigned char cp_len, cp_fast, cp_slot2;
+static unsigned char *cp_link;
+static unsigned int cp_pos, cp_row, cp_dx;
+static int cp_x;
+
+static void col_prepare_piege_state(LivePGE *pge) __naked
 {
-    unsigned char len = init_field8(pge->index, 28);   /* collision_data_len */
-    unsigned char c, lo, prev, fast_ok = 0;
-    int found;
-    int x;
-    unsigned int fast_row = 0;
-    if (len == 0) { pge->collision_slot = 0xFF; return; }
-    if ((signed char)pge->room_location >= 0 && pge->pos_y >= 0 && pge->pos_y < 216) {
-        int row = div72(pge->pos_y - 8);
-        if (row >= 0 && row <= 2) {
-            fast_row = (unsigned int)(row * 16) + ((unsigned int)pge->room_location << 6);
-            fast_ok = 1;
-        }
-    }
-    cp_link = &pge->collision_slot;
-    x = pge->pos_x;
-    for (c = 0; c < len; c++, x += 0x10) {
-        if (col_cur_slot >= COL_SLOTS) return;
-        cp_slot2 = col_cur_slot++;
-        /* the slots of an object step one grid cell at a time, so the common
-         * case is the previous cell plus one: only fall back to the full
-         * computation when the object straddles a room edge */
-        if (fast_ok && (unsigned int)x < 256) {
-            cp_pos = fast_row + (((unsigned int)x + 8) >> 4);
-        } else {
-            cp_pos = col_get_grid_pos(pge, (int)c << 4);
-            if (cp_pos == 0xFFFF) { *cp_link = 0xFF; return; }
-        }
-        col_ct_pos[cp_slot2] = cp_pos;
-        col_live[cp_slot2] = pge->index;
-        col_index[cp_slot2] = 0xFF;
-        found = col_find_slot(cp_pos);
-        if (found >= 0) {
-            prev = col_table[(unsigned char)found];
-            col_prev[cp_slot2] = prev;
-            col_table[(unsigned char)found] = cp_slot2;
-            *cp_link = (unsigned char)found;
-            if (pge->flags & 0x80) pge->flags |= 4;
-            if (prev != 0xFF) {
-                LivePGE *o = &pge_live[col_live[prev]];
-                if (o->flags & 0x80) o->flags |= 4;
-            }
-        } else {
-            col_prev[cp_slot2] = 0xFF;
-            if (col_cur_pos >= COL_SLOTS) return;
-            col_table[col_cur_pos] = cp_slot2;
-            lo = (unsigned char)cp_pos & 63;
-            col_used[lo >> 3] |= bit_of[lo & 7];
-            if (col_cur_pos > col_peak_pos) col_peak_pos = col_cur_pos;
-            if (col_cur_slot > col_peak_slot) col_peak_slot = col_cur_slot;
-            *cp_link = col_cur_pos;
-            col_cur_pos++;
-        }
-        cp_link = &col_index[cp_slot2];
-    }
+    (void)pge;
+    __asm
+    push ix
+    push hl
+    pop  ix                     ; ix = pge
+    ld   a, 18 (ix)
+    ld   l, #28
+    call _init_field8
+    or   a, a
+    jr   nz, 00001$
+    ld   16 (ix), #0xff
+    pop  ix
+    ret
+00001$:
+    ld   (_cp_len), a
+    xor  a, a
+    ld   (_cp_fast), a
+    bit  7, 15 (ix)
+    jr   nz, 00002$             ; room < 0
+    ld   l, 4 (ix)
+    ld   h, 5 (ix)
+    bit  7, h
+    jr   nz, 00002$             ; pos_y < 0
+    ld   de, #216
+    or   a, a
+    sbc  hl, de
+    jr   nc, 00002$             ; pos_y >= 216
+    add  hl, de
+    ld   de, #-8
+    add  hl, de
+    call _div72                 ; de = row
+    ld   a, d
+    or   a, a
+    jr   nz, 00002$
+    ld   a, e
+    cp   a, #3
+    jr   nc, 00002$
+    ld   l, a
+    ld   h, #0
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl                 ; row * 16
+    ex   de, hl
+    ld   l, 15 (ix)
+    ld   h, #0
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl                 ; room * 64
+    add  hl, de
+    ld   (_cp_row), hl
+    ld   a, #1
+    ld   (_cp_fast), a
+00002$:
+    push ix
+    pop  hl
+    ld   de, #16
+    add  hl, de
+    ld   (_cp_link), hl         ; &collision_slot
+    ld   l, 2 (ix)
+    ld   h, 3 (ix)
+    ld   (_cp_x), hl
+    ld   hl, #0
+    ld   (_cp_dx), hl
+00010$:                         ; per cell
+    ld   a, (_col_cur_slot)
+    cp   a, #160
+    jp   nc, 00099$
+    ld   (_cp_slot2), a
+    inc  a
+    ld   (_col_cur_slot), a
+    ld   a, (_cp_fast)
+    or   a, a
+    jr   z, 00011$
+    ld   hl, (_cp_x)
+    ld   a, h
+    or   a, a
+    jr   nz, 00011$             ; x outside 0..255
+    ld   a, l
+    add  a, #8
+    rra                         ; 9-bit (x + 8) >> 1
+    srl  a
+    srl  a
+    srl  a                      ; (x + 8) >> 4
+    ld   hl, (_cp_row)
+    add  a, l
+    ld   l, a
+    jr   nc, 00012$
+    inc  h
+    jr   00012$
+00011$:
+    push ix
+    pop  hl
+    ld   de, (_cp_dx)
+    call _col_get_grid_pos      ; de = pos
+    ex   de, hl
+    ld   a, l
+    and  a, h
+    inc  a
+    jr   nz, 00012$
+    ld   hl, (_cp_link)         ; off the map: end the chain
+    ld   (hl), #0xff
+    jp   00099$
+00012$:
+    ld   (_cp_pos), hl
+    ex   de, hl                 ; de = pos
+    ld   a, (_cp_slot2)
+    ld   c, a
+    ld   b, #0
+    ld   hl, #_col_ct_pos
+    add  hl, bc
+    add  hl, bc
+    ld   (hl), e
+    inc  hl
+    ld   (hl), d
+    ld   hl, #_col_live
+    add  hl, bc
+    ld   a, 18 (ix)
+    ld   (hl), a
+    ld   hl, #_col_index
+    add  hl, bc
+    ld   (hl), #0xff
+    ex   de, hl                 ; hl = pos
+    call _col_find_slot         ; de = found or -1
+    bit  7, d
+    jr   nz, 00020$
+    ld   c, e                   ; found
+    ld   b, #0
+    ld   hl, #_col_table
+    add  hl, bc
+    ld   d, (hl)                ; d = prev
+    ld   a, (_cp_slot2)
+    ld   (hl), a                ; col_table[found] = slot2
+    ld   c, a
+    ld   hl, #_col_prev
+    add  hl, bc
+    ld   (hl), d
+    ld   hl, (_cp_link)
+    ld   (hl), e
+    bit  7, 17 (ix)
+    jr   z, 00013$
+    set  2, 17 (ix)
+00013$:
+    ld   a, d
+    inc  a
+    jr   z, 00030$              ; no previous occupant
+    ld   c, d
+    ld   hl, #_col_live
+    add  hl, bc
+    ld   l, (hl)
+    ld   h, #0
+    ld   e, l
+    ld   d, h
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, de
+    add  hl, de
+    add  hl, de                 ; index * 19
+    ld   de, #(_pge_live + 17)
+    add  hl, de
+    bit  7, (hl)
+    jr   z, 00030$
+    set  2, (hl)
+    jr   00030$
+00020$:                         ; a new cell
+    ld   a, (_cp_slot2)
+    ld   c, a
+    ld   b, #0
+    ld   hl, #_col_prev
+    add  hl, bc
+    ld   (hl), #0xff
+    ld   a, (_col_cur_pos)
+    cp   a, #160
+    jr   nc, 00099$
+    ld   e, a                   ; e = col_cur_pos
+    ld   c, a
+    ld   hl, #_col_table
+    add  hl, bc
+    ld   a, (_cp_slot2)
+    ld   (hl), a
+    ld   a, (_cp_pos)
+    and  a, #63
+    ld   d, a
+    rrca
+    rrca
+    rrca
+    and  a, #7
+    ld   c, a
+    ld   hl, #_col_used
+    add  hl, bc
+    push hl
+    ld   a, d
+    and  a, #7
+    ld   c, a
+    ld   hl, #_bit_of
+    add  hl, bc
+    ld   a, (hl)
+    pop  hl
+    or   a, (hl)
+    ld   (hl), a
+    ld   a, (_col_peak_pos)
+    cp   a, e
+    jr   nc, 00021$
+    ld   a, e
+    ld   (_col_peak_pos), a
+00021$:
+    ld   a, (_col_cur_slot)
+    ld   d, a
+    ld   a, (_col_peak_slot)
+    cp   a, d
+    jr   nc, 00022$
+    ld   a, d
+    ld   (_col_peak_slot), a
+00022$:
+    ld   hl, (_cp_link)
+    ld   (hl), e
+    ld   a, e
+    inc  a
+    ld   (_col_cur_pos), a
+00030$:                         ; next cell
+    ld   a, (_cp_slot2)
+    ld   c, a
+    ld   b, #0
+    ld   hl, #_col_index
+    add  hl, bc
+    ld   (_cp_link), hl
+    ld   de, #16
+    ld   hl, (_cp_x)
+    add  hl, de
+    ld   (_cp_x), hl
+    ld   hl, (_cp_dx)
+    add  hl, de
+    ld   (_cp_dx), hl
+    ld   hl, #_cp_len
+    dec  (hl)
+    jp   nz, 00010$
+00099$:
+    pop  ix
+    ret
+    __endasm;
 }
 
 static void col_prepare_room_state(void)
@@ -1235,65 +1466,308 @@ static int exec_op(unsigned char op, LivePGE *pge, int a, int b)
     }
 }
 
-/* `ob` is the record in ROM bank `bank`; an opcode may map other banks (or walk
- * another script), so the bank is mapped again after each one */
-static int pge_execute(LivePGE *pge, const unsigned char *ob, unsigned char bank)
+LAYOUT_CHECK(lp_first, __builtin_offsetof(LivePGE, first_obj) == 8);
+LAYOUT_CHECK(lp_life,  __builtin_offsetof(LivePGE, life) == 10);
+
+/* Run one script record `ob` (in ROM bank ex_bank) for `pge`: up to three
+ * opcodes, each must succeed; then the record becomes the object's state.
+ * An opcode may map other banks or walk another script, so the record's bank
+ * is mapped again after each one.  Returns 0 (a condition failed, or an
+ * opcode is not ported) or 0xFFFF.  In asm; the C it implements:
+ *   if (op1 && (!(exec_op(op1, pge, arg1, 0) & 0xFF) || logic_bad_op)) return 0
+ *   if (op2 && (!(exec_op(op2, pge, arg2, arg1) & 0xFF) || logic_bad_op)) return 0
+ *   if (op3) { exec_op(op3, pge, arg3, 0); if (logic_bad_op) return 0; }
+ *   obj_type = init_type; first_obj = init_num; anim_seq = 0
+ *   fl = ob flags: 1 turn around, 2 life--, 4 life++, 8 life = -1
+ *   pos_x += facing ? -dx : dx; pos_y += dy
+ * (the engine passes the FIRST argument as op2's second parameter) */
+static unsigned char ex_bank;
+static const unsigned char *ex_ob;
+
+static int pge_execute(LivePGE *pge, const unsigned char *ob) __naked
 {
-    unsigned char op, fl;
-    op = OB_OP1(ob);
-    if (op) {
-        if (!(exec_op(op, pge, OB_ARG1(ob), 0) & 0xFF)) return 0;
-        if (logic_bad_op) return 0;
-        SMS_mapROMBank(bank);
-    }
-    op = OB_OP2(ob);
-    if (op) {
-        /* the engine passes the FIRST argument as the second parameter here */
-        if (!(exec_op(op, pge, OB_ARG2(ob), OB_ARG1(ob)) & 0xFF)) return 0;
-        if (logic_bad_op) return 0;
-        SMS_mapROMBank(bank);
-    }
-    op = OB_OP3(ob);
-    if (op) {
-        exec_op(op, pge, OB_ARG3(ob), 0);
-        if (logic_bad_op) return 0;
-        SMS_mapROMBank(bank);
-    }
-    pge->obj_type = OB_INIT_TYPE(ob);
-    pge->first_obj = OB_INIT_NUM(ob);
-    pge->anim_seq = 0;
-    /* the object record's own flags act on the live object: turn around,
-     * lose or gain life, and then it carries the step in dx/dy */
-    fl = OB_FLAGS(ob);
-    if (fl & 1) pge->flags ^= 1;
-    if (fl & 2) pge->life--;
-    if (fl & 4) pge->life++;
-    if (fl & 8) pge->life = -1;
-    if (pge->flags & 1) pge->pos_x -= OB_DX(ob);
-    else                pge->pos_x += OB_DX(ob);
-    pge->pos_y += OB_DY(ob);
-    return 0xFFFF;
+    (void)pge; (void)ob;
+    __asm
+    push ix
+    push hl
+    pop  ix                     ; ix = pge
+    ld   (_ex_ob), de
+    ex   de, hl
+    ld   de, #7
+    add  hl, de
+    ld   a, (hl)                ; op1
+    or   a, a
+    jr   z, 00002$
+    ld   de, #5
+    add  hl, de                 ; ob + 12
+    ld   c, (hl)
+    inc  hl
+    ld   b, (hl)                ; arg1
+    ld   hl, #0
+    push hl
+    push bc
+    push ix
+    pop  de
+    call _exec_op
+    ld   a, e
+    or   a, a
+    jp   z, 00090$
+    ld   a, (_logic_bad_op)
+    or   a, a
+    jp   nz, 00090$
+    ld   a, (_ex_bank)
+    ld   (_ROM_bank_to_be_mapped_on_slot2), a
+00002$:
+    ld   hl, (_ex_ob)
+    ld   de, #6
+    add  hl, de
+    ld   a, (hl)                ; op2
+    or   a, a
+    jr   z, 00004$
+    ld   de, #6
+    add  hl, de                 ; ob + 12
+    ld   c, (hl)
+    inc  hl
+    ld   b, (hl)                ; arg1
+    inc  hl
+    ld   e, (hl)
+    inc  hl
+    ld   d, (hl)                ; arg2
+    push bc
+    push de
+    push ix
+    pop  de
+    call _exec_op
+    ld   a, e
+    or   a, a
+    jp   z, 00090$
+    ld   a, (_logic_bad_op)
+    or   a, a
+    jp   nz, 00090$
+    ld   a, (_ex_bank)
+    ld   (_ROM_bank_to_be_mapped_on_slot2), a
+00004$:
+    ld   hl, (_ex_ob)
+    ld   de, #9
+    add  hl, de
+    ld   a, (hl)                ; op3
+    or   a, a
+    jr   z, 00006$
+    ld   de, #7
+    add  hl, de                 ; ob + 16
+    ld   c, (hl)
+    inc  hl
+    ld   b, (hl)                ; arg3
+    ld   hl, #0
+    push hl
+    push bc
+    push ix
+    pop  de
+    call _exec_op
+    ld   a, (_logic_bad_op)
+    or   a, a
+    jp   nz, 00090$
+    ld   a, (_ex_bank)
+    ld   (_ROM_bank_to_be_mapped_on_slot2), a
+00006$:
+    ld   hl, (_ex_ob)
+    ld   de, #4
+    add  hl, de
+    ld   a, (hl)
+    ld   0 (ix), a
+    inc  hl
+    ld   a, (hl)
+    ld   1 (ix), a              ; obj_type = init_obj_type
+    ld   de, #5
+    add  hl, de                 ; ob + 10
+    ld   a, (hl)
+    ld   8 (ix), a
+    inc  hl
+    ld   a, (hl)
+    ld   9 (ix), a              ; first_obj = init_obj_number
+    ld   14 (ix), #0            ; anim_seq
+    ld   hl, (_ex_ob)
+    ld   de, #8
+    add  hl, de
+    ld   c, (hl)                ; record flags
+    bit  0, c
+    jr   z, 00010$
+    ld   a, 17 (ix)
+    xor  a, #1
+    ld   17 (ix), a
+00010$:
+    ld   l, 10 (ix)
+    ld   h, 11 (ix)             ; life
+    bit  1, c
+    jr   z, 00011$
+    dec  hl
+00011$:
+    bit  2, c
+    jr   z, 00012$
+    inc  hl
+00012$:
+    bit  3, c
+    jr   z, 00013$
+    ld   hl, #0xffff
+00013$:
+    ld   10 (ix), l
+    ld   11 (ix), h
+    ld   hl, (_ex_ob)
+    inc  hl
+    inc  hl
+    ld   a, (hl)                ; dx
+    ld   e, a
+    rlca
+    sbc  a, a
+    ld   d, a
+    inc  hl
+    ld   c, (hl)                ; dy
+    ld   l, 2 (ix)
+    ld   h, 3 (ix)
+    bit  0, 17 (ix)
+    jr   z, 00014$
+    or   a, a
+    sbc  hl, de
+    jr   00015$
+00014$:
+    add  hl, de
+00015$:
+    ld   2 (ix), l
+    ld   3 (ix), h
+    ld   a, c
+    ld   e, a
+    rlca
+    sbc  a, a
+    ld   d, a
+    ld   l, 4 (ix)
+    ld   h, 5 (ix)
+    add  hl, de
+    ld   4 (ix), l
+    ld   5 (ix), h
+    ld   de, #0xffff
+    pop  ix
+    ret
+00090$:
+    ld   de, #0
+    pop  ix
+    ret
+    __endasm;
 }
 
-static void pge_setup_anim(LivePGE *pge)
+/* In asm: SDCC's version was ~150 instructions.  The C it implements:
+ *   rec = map_ani(obj_type); if (rd16(rec) < anim_seq) anim_seq = 0;
+ *   fr = rec + 6 + anim_seq * 4; fr0 = rd16(fr); if (fr0 == 0xFFFF) return;
+ *   fl = fr0 ^ (facing ? 0x8000 : 0); pos_x += facing ? -dx : dx; pos_y += dy;
+ *   flags bit 1 = fl bit 15, bit 3 = (rd16(rec + 4) != 0);
+ *   anim_number = fr0 & 0x7FFF;          (dx, dy = signed fr[2], fr[3]) */
+static void pge_setup_anim(LivePGE *pge) __naked
 {
-    const unsigned char *rec = map_ani(pge->obj_type);
-    const unsigned char *fr;
-    unsigned int fl, fr0;
-    unsigned char f;
-    if (*(const unsigned int *)rec < pge->anim_seq) pge->anim_seq = 0;
-    fr = rec + 6 + ((unsigned int)pge->anim_seq << 2);
-    fr0 = *(const unsigned int *)fr;
-    if (fr0 == 0xFFFF) return;
-    fl = fr0;
-    if (pge->flags & 1) { fl ^= 0x8000; pge->pos_x -= (signed char)fr[2]; }
-    else                 pge->pos_x += (signed char)fr[2];
-    pge->pos_y += (signed char)fr[3];
-    f = pge->flags & ~(2 | 8);
-    if (fl & 0x8000) f |= 2;
-    if (*(const unsigned int *)(rec + 4)) f |= 8;
-    pge->flags = f;
-    pge->anim_number = fr0 & 0x7FFF;
+    (void)pge;
+    __asm
+    push ix
+    push hl
+    pop  ix                     ; ix = pge
+    ld   l, 0 (ix)
+    ld   h, 1 (ix)
+    call _map_ani               ; de = rec (bank mapped)
+    ex   de, hl                 ; hl = rec
+    inc  hl
+    ld   a, (hl)                ; sequence count, high byte
+    dec  hl
+    or   a, a
+    jr   nz, 00001$             ; count >= 256 > anim_seq
+    ld   a, (hl)
+    cp   a, 14 (ix)
+    jr   nc, 00001$             ; count >= anim_seq
+    ld   14 (ix), #0
+00001$:
+    push hl                     ; rec
+    ld   e, 14 (ix)
+    ld   d, #0
+    ex   de, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, de
+    ld   de, #6
+    add  hl, de                 ; hl = fr
+    ld   c, (hl)
+    inc  hl
+    ld   b, (hl)                ; bc = fr0
+    inc  hl
+    ld   a, c
+    and  a, b
+    inc  a
+    jr   z, 00009$              ; fr0 == 0xFFFF
+    ld   e, (hl)                ; dx
+    inc  hl
+    ld   d, (hl)                ; dy
+    ld   6 (ix), c              ; anim_number = fr0 & 0x7FFF
+    ld   a, b
+    and  a, #0x7f
+    ld   7 (ix), a
+    ld   a, e                   ; hl = (int)dx
+    ld   l, a
+    rlca
+    sbc  a, a
+    ld   h, a
+    bit  0, 17 (ix)
+    jr   z, 00002$
+    ld   a, b                   ; facing: fl ^= 0x8000, pos_x -= dx
+    xor  a, #0x80
+    ld   b, a
+    ld   a, 2 (ix)
+    sub  a, l
+    ld   2 (ix), a
+    ld   a, 3 (ix)
+    sbc  a, h
+    ld   3 (ix), a
+    jr   00003$
+00002$:
+    ld   a, 2 (ix)
+    add  a, l
+    ld   2 (ix), a
+    ld   a, 3 (ix)
+    adc  a, h
+    ld   3 (ix), a
+00003$:
+    ld   a, d                   ; pos_y += dy
+    ld   l, a
+    rlca
+    sbc  a, a
+    ld   h, a
+    ld   a, 4 (ix)
+    add  a, l
+    ld   4 (ix), a
+    ld   a, 5 (ix)
+    adc  a, h
+    ld   5 (ix), a
+    ld   a, 17 (ix)
+    and  a, #0xf5
+    bit  7, b
+    jr   z, 00004$
+    or   a, #0x02
+00004$:
+    ld   c, a
+    pop  hl                     ; rec
+    inc  hl
+    inc  hl
+    inc  hl
+    inc  hl
+    ld   a, (hl)
+    inc  hl
+    or   a, (hl)
+    ld   a, c
+    jr   z, 00005$
+    or   a, #0x08
+00005$:
+    ld   17 (ix), a
+    pop  ix
+    ret
+00009$:
+    pop  hl
+    pop  ix
+    ret
+    __endasm;
 }
 
 /* pge_addToCurrentRoomList(): move an object between the per-room lists.
@@ -1431,34 +1905,129 @@ static void pge_message_ack(LivePGE *pge)
     }
 }
 
-static void pge_process(LivePGE *pge)
+/* One object's frame: react to pending messages, and once its animation has
+ * run out walk its script from first_obj for the first record whose
+ * conditions hold; then advance the animation.  In asm; the C it implements:
+ *   s_facing = flags & 1; s_pge_room = room_location
+ *   if (msg_head[index] != 0xFF) pge_message_ack(pge)
+ *   if (rd16(map_ani(obj_type)) <= anim_seq) {
+ *       first = node_table[init_field16(index, I_NODE)] + first_obj
+ *       for (guard = 4000; guard; guard--, first++) {
+ *           ob = object_ptr(first)
+ *           if (type(ob) != obj_type) { msg_clear(index); return; }
+ *           ex_bank = ro_bank
+ *           if (pge_execute(pge, ob)) { pge_setup_other_pieges(pge); break; }
+ *           if (logic_bad_op) return
+ *       }
+ *   }
+ *   pge_setup_anim(pge); anim_seq++; msg_clear(index)                     */
+static unsigned int pp_first, pp_guard;
+
+static void pge_process(LivePGE *pge) __naked
 {
-    const unsigned char *rec;
-    unsigned int seq_count, node, first, guard;
-    const unsigned char *ob;
-
-    s_facing = (pge->flags & 1) != 0;
-    s_pge_room = pge->room_location;
-    if (msg_head[pge->index] != 0xFF) pge_message_ack(pge);
-
-    rec = map_ani(pge->obj_type);
-    seq_count = *(const unsigned int *)rec;
-    if (seq_count <= pge->anim_seq) {
-        node = init_field16(pge->index, I_NODE);
-        SMS_mapROMBank(s_bank_a);
-        first = *(const unsigned int *)(s_node_tab + node * 2);
-        first += pge->first_obj;
-        for (guard = 0; guard < 4000; guard++) {
-            ob = object_ptr(first);
-            if (OB_TYPE(ob) != pge->obj_type) { msg_clear(pge->index); return; }
-            if (pge_execute(pge, ob, ro_bank)) { pge_setup_other_pieges(pge); break; }
-            if (logic_bad_op) return;
-            ++first;
-        }
-    }
-    pge_setup_anim(pge);
-    ++pge->anim_seq;
-    msg_clear(pge->index);
+    (void)pge;
+    __asm
+    push ix
+    push hl
+    pop  ix
+    ld   a, 17 (ix)
+    and  a, #1
+    ld   (_s_facing), a
+    ld   a, 15 (ix)
+    ld   (_s_pge_room), a
+    ld   e, 18 (ix)
+    ld   d, #0
+    ld   hl, #_msg_head
+    add  hl, de
+    ld   a, (hl)
+    inc  a
+    jr   z, 00001$
+    push ix
+    pop  hl
+    call _pge_message_ack
+00001$:
+    ld   l, 0 (ix)
+    ld   h, 1 (ix)
+    call _map_ani               ; de = animation record
+    ex   de, hl
+    ld   e, (hl)
+    inc  hl
+    ld   a, (hl)
+    or   a, a
+    jr   nz, 00020$             ; sequence count >= 256: still animating
+    ld   a, 14 (ix)
+    cp   a, e
+    jr   c, 00020$              ; anim_seq < count: still animating
+    ld   a, 18 (ix)
+    ld   l, #6                  ; I_NODE
+    call _init_field16          ; de = node
+    ld   a, (_s_bank_a)
+    ld   (_ROM_bank_to_be_mapped_on_slot2), a
+    ex   de, hl
+    add  hl, hl
+    ld   de, (_s_node_tab)
+    add  hl, de
+    ld   e, (hl)
+    inc  hl
+    ld   d, (hl)
+    ld   l, 8 (ix)
+    ld   h, 9 (ix)
+    add  hl, de
+    ld   (_pp_first), hl
+    ld   hl, #4000
+    ld   (_pp_guard), hl
+00010$:
+    ld   hl, (_pp_first)
+    call _object_ptr            ; de = record
+    ld   a, (de)
+    cp   a, 0 (ix)
+    jr   nz, 00015$
+    inc  de
+    ld   a, (de)
+    cp   a, 1 (ix)
+    jr   nz, 00015$
+    dec  de
+    ld   a, (_ro_bank)
+    ld   (_ex_bank), a
+    push ix
+    pop  hl
+    call _pge_execute
+    ld   a, e
+    or   a, d
+    jr   z, 00012$
+    push ix
+    pop  hl
+    call _pge_setup_other_pieges
+    jr   00020$
+00012$:
+    ld   a, (_logic_bad_op)
+    or   a, a
+    jr   nz, 00099$
+    ld   hl, (_pp_first)
+    inc  hl
+    ld   (_pp_first), hl
+    ld   hl, (_pp_guard)
+    dec  hl
+    ld   (_pp_guard), hl
+    ld   a, h
+    or   a, l
+    jr   nz, 00010$
+    jr   00020$
+00015$:                         ; past this node's records
+    ld   a, 18 (ix)
+    call _msg_clear
+    jr   00099$
+00020$:
+    push ix
+    pop  hl
+    call _pge_setup_anim
+    inc  14 (ix)
+    ld   a, 18 (ix)
+    call _msg_clear
+00099$:
+    pop  ix
+    ret
+    __endasm;
 }
 
 /* --------------------------------------------------------------- frame --- */
@@ -1533,9 +2102,7 @@ void logic_start(unsigned char level_index)
 /* Next object at or after `p` with flags bit 2 (active), or NULL once
  * s_scan_left objects have been passed.  In C each skipped object cost ~270
  * cycles (the loop state lives in ix slots), and both per-frame loops skip
- * most of the table.  The asm hard-codes the LivePGE layout, checked here. */
-typedef char livepge_size_check[(sizeof(LivePGE) == 19) ? 1 : -1];
-typedef char livepge_flags_check[(__builtin_offsetof(LivePGE, flags) == 17) ? 1 : -1];
+ * most of the table. */
 static unsigned char s_scan_left;
 
 static LivePGE *scan_active(LivePGE *p) __naked
@@ -1578,7 +2145,6 @@ unsigned char logic_object_type(unsigned char idx)
 
 unsigned char logic_step(void)
 {
-    unsigned int i;
     const unsigned char *p;
     if (!logic_running) return 0;
     if (logic_use_pad) {
