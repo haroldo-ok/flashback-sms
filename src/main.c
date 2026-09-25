@@ -216,17 +216,26 @@ void main(void)
     }
 
     for (;;) {
+        /* A game tick still takes longer than its 2 frames, so one is nearly
+         * always due: waiting for the next vblank first only wasted up to a
+         * frame per pass.  Wait only when there is nothing to run yet. */
+        unsigned char waited = 0, n;
         watchdog = 0;
-        SMS_waitForVBlank();
-        music_frame();                 /* one 60 Hz step of the score */
-        sfx_frame();
+        if (game_state != ST_SIM || tick_acc + frames_elapsed < 2) {
+            SMS_waitForVBlank();
+            waited = 1;
+        }
         keys = SMS_getKeysStatus();
         pressed = SMS_getKeysPressed();
 
         /* real frames since the last loop (a heavy tick can overrun one) */
         e = frames_elapsed; frames_elapsed = 0;
-        if (!e) e = 1;
+        if (!e && waited) e = 1;
         if (e > 12) e = 12;
+        /* the score and effects advance one 60 Hz step per frame that passed:
+         * the loop no longer runs once per frame, and their tempo must not
+         * follow the game's speed */
+        for (n = e; n; n--) { music_frame(); sfx_frame(); }
 
         /* PAUSE only means something while playing; one pressed on the title
          * or during a cutscene would otherwise quit the game on its first frame */
@@ -275,7 +284,9 @@ void main(void)
                 sim_step();
             }
             ticks_behind = tick_acc >> 1;
-            if (tick_acc > 100) tick_acc = 100;
+            /* a small backlog only: a bigger one plays back as a fast-forward
+             * burst as soon as a lighter room lets the game catch up */
+            if (tick_acc > 4) tick_acc = 4;
             /* the game can ask for a cutscene (picking up an item does) */
             if (logic_cutscene != 0xFFFF) {
                 unsigned char c = (FMV_NUM_CLIPS > 0) ? fmv_find((unsigned char)logic_cutscene) : 0xFF;
