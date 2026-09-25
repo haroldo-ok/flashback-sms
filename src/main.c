@@ -228,6 +228,10 @@ void main(void)
         if (!e) e = 1;
         if (e > 12) e = 12;
 
+        /* PAUSE only means something while playing; one pressed on the title
+         * or during a cutscene would otherwise quit the game on its first frame */
+        if (game_state != ST_SIM && SMS_queryPauseRequested()) SMS_resetPauseRequest();
+
         if (game_state == ST_CUTSCENE) {
             /* streams are 60 Hz ticks: run 5 (NTSC) or 6 (PAL) ticks per 5
              * frames, and catch up after an overrun during the cheap wait
