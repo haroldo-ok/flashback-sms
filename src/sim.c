@@ -455,6 +455,39 @@ static void unhide_items(unsigned char idx, unsigned char room)
     }
 }
 
+#if DEBUG_PAD
+/* Input debugging (make DEBUG_PAD=1): a row of markers at the top left shows
+ * the pad the game logic received this tick - left, right, up, down, then
+ * button 1 and button 2.  Tile 48 is free while playing: sprites stream
+ * through 0..47 and rooms start at 64.  Cutscenes overwrite it, so it is
+ * uploaded again with every room. */
+#define DEBUG_TILE 48
+static void debug_pad_tiles(void)
+{
+    unsigned char t[32], r, k, best = 1, lum, top = 0;
+    for (k = 1; k < 16; k++) {            /* the brightest sprite colour */
+        unsigned char c = spr_palette[k];
+        lum = (c & 3) + ((c >> 2) & 3) + ((c >> 4) & 3);
+        if (lum > top) { top = lum; best = k; }
+    }
+    for (r = 0; r < 8; r++)
+        for (k = 0; k < 4; k++)
+            t[r * 4 + k] = (r >= 1 && r <= 6 && ((best >> k) & 1)) ? 0x7E : 0;
+    SMS_loadTiles(t, DEBUG_TILE, 32);
+    for (k = 0; k < 32; k++) t[k] = 0;
+    SMS_loadTiles(t, DEBUG_TILE + 1, 32);
+}
+
+static void debug_pad_draw(void)
+{
+    static const unsigned char bit[6] = { 4, 8, 1, 2, 0x40, 0x20 };
+    static const unsigned char xs[6] = { 8, 18, 28, 38, 56, 66 };
+    unsigned char i;
+    for (i = 0; i < 6; i++)
+        if (logic_pad_mask & bit[i]) SMS_addSprite(xs[i], 2, DEBUG_TILE);
+}
+#endif
+
 /* The camera.  The room is 224 lines and the screen 192, so the view scrolls
  * by up to ROOM_SCROLL_MAX.  It follows the floor Conrad is on (the engine
  * stands characters at y 70, 142 and 214), not his pos_y: that moves with
@@ -499,6 +532,9 @@ static void load_room(unsigned char room)
     SMS_displayOn();
     sim_room = room;
     cam_snap = 1;
+#if DEBUG_PAD
+    debug_pad_tiles();
+#endif
     for (idx = 0; idx < SPR_SLOTS; idx++) { slot_tile[idx] = 0xFFFF; slot_bot[idx] = 0xFFFF; }
 }
 
@@ -568,5 +604,8 @@ void sim_step(void)
     draw_objects();
     n = dp_n;
     sim_sprites = n;
+#if DEBUG_PAD
+    debug_pad_draw();
+#endif
     SMS_copySpritestoSAT();
 }

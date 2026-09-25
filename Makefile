@@ -7,7 +7,9 @@ CC     := sdcc
 # 1 = boot diagnostics build (used by `make check`); 0 = the ROM you play
 SELF_TEST ?= 0
 TEST_NO_INVENTORY ?= 0
-CFLAGS := -mz80 -I$(DEVKIT)/include -Igen -Isrc --peep-file $(DEVKIT)/include/peep-rules.txt --max-allocs-per-node 20000 -DSELF_TEST=$(SELF_TEST) -DTEST_NO_INVENTORY=$(TEST_NO_INVENTORY)
+# 1 = show the pad the game logic received as markers on screen (input debugging)
+DEBUG_PAD ?= 0
+CFLAGS := -mz80 -I$(DEVKIT)/include -Igen -Isrc --peep-file $(DEVKIT)/include/peep-rules.txt --max-allocs-per-node 20000 -DSELF_TEST=$(SELF_TEST) -DTEST_NO_INVENTORY=$(TEST_NO_INVENTORY) -DDEBUG_PAD=$(DEBUG_PAD)
 LDFLAGS:= -mz80 --no-std-crt0 --data-loc 0xC000
 OBJS   := build/main.rel build/fmv.rel build/room.rel build/pge.rel build/logic.rel build/sim.rel build/tiledec.rel build/psg.rel build/data_index.rel
 DEMO   ?= demo/DATA
