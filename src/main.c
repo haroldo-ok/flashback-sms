@@ -50,6 +50,11 @@ volatile unsigned char watchdog;     /* frames since the main loop last ran */
 static volatile unsigned int keys_pressed_latch;   /* new presses */
 static volatile unsigned int keys_held_latch;      /* down at any point */
 
+/* frames after the title appears during which presses are ignored: a burst
+ * of presses aimed at the intro should not fall through and start a level */
+#define TITLE_GUARD 15
+static unsigned char title_guard;
+
 /* the buttons newly pressed since the last call */
 static unsigned int input_take_presses(void)
 {
@@ -141,11 +146,18 @@ static void enter_title(void)
 #endif
     SMS_displayOn();
     game_state = ST_TITLE;
+    /* presses made while the intro ended and this loaded were meant for the
+     * intro: without this, mashing the skip button started the game too */
+    input_take_presses();
+    title_guard = TITLE_GUARD;
 }
 
-static void play_clip(unsigned char clip)
+/* discard_presses: the press that led here (starting a level, the game
+ * asking for a cutscene) must not also skip the clip.  The boot's intro keeps
+ * them, so a press made while the ROM starts up skips it. */
+static void play_clip(unsigned char clip, unsigned char discard_presses)
 {
-    input_take_presses();            /* the press that started it is not a skip */
+    if (discard_presses) input_take_presses();
 #if HAS_MUSIC
     {   /* the score the game itself uses for this cutscene */
         unsigned char id = fmv_clip_id[clip];
@@ -190,7 +202,7 @@ static void clip_finished(void)
         unsigned char c;
         seq_pos++;
         c = next_intro_clip();
-        if (c != 0xFF) { play_clip(c); return; }
+        if (c != 0xFF) { play_clip(c, 0); return; }
     }
     enter_title();
 }
@@ -204,8 +216,10 @@ void main(void)
     SMS_useFirstHalfTilesforSprites(1);
     SMS_setSpriteMode(SPRITEMODE_NORMAL);
     hide_sprites();
-    is_pal = detect_pal();
+    /* installed first, so a press during the PAL check (the first ~12
+     * frames) is latched and skips the intro like any other */
     SMS_setFrameInterruptHandler(frame_irq);
+    is_pal = detect_pal();
 
     /* The self-test builds every level's object table and runs the ported
      * interpreter against the recorded demo - about a minute with nothing on
@@ -235,7 +249,7 @@ void main(void)
     {   /* a build without cutscenes starts in the room viewer */
         unsigned char c0 = (FMV_NUM_CLIPS > 0) ? next_intro_clip() : 0xFF;
         if (c0 == 0xFF) { seq_pos = INTRO_LEN; enter_title(); }
-        else play_clip(c0);
+        else play_clip(c0, 0);
     }
 
     for (;;) {
@@ -305,7 +319,7 @@ void main(void)
                     tick_acc = 0;
                     SMS_setSpriteMode(SPRITEMODE_NORMAL);
                     hide_sprites();
-                    play_clip(c);
+                    play_clip(c, 1);
                 }
             }
             /* leave with PAUSE: button 1 is the run key while playing */
@@ -317,6 +331,10 @@ void main(void)
                 enter_title();
             }
         } else {                    /* title screen: pick a level, any button starts it */
+            if (title_guard) {
+                title_guard = (title_guard > e) ? title_guard - e : 0;
+                pressed = 0;
+            }
 #if HAS_MENU
             if ((pressed & PORT_A_KEY_UP) && level_sel) { level_sel--; draw_level_text(); }
             else if ((pressed & PORT_A_KEY_DOWN) && level_sel + 1 < NUM_SEL
@@ -325,7 +343,7 @@ void main(void)
             if (pressed & (PORT_A_KEY_1 | PORT_A_KEY_2)) {
                 unsigned char lv = level_start[level_sel];
                 unsigned char c = fmv_find(level_cutscene[lv]);
-                if (c != 0xFF) { start_after_clip = 1; play_clip(c); }
+                if (c != 0xFF) { start_after_clip = 1; play_clip(c, 1); }
                 else { sim_start(level_start[level_sel]); game_state = ST_SIM; }
             }
         }
