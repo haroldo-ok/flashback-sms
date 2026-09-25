@@ -281,14 +281,15 @@ void main(void)
             /* streams are 60 Hz ticks: run 5 (NTSC) or 6 (PAL) ticks per 5
              * frames, and catch up after an overrun during the cheap wait
              * ticks that follow each ~12 fps picture change */
-            unsigned char alive = 1, budget = 3, skip = (pressed & PORT_A_KEY_1) != 0;
+            /* either button skips, as either starts a level on the title */
+            unsigned char alive = 1, budget = 3, skip = (pressed & (PORT_A_KEY_1 | PORT_A_KEY_2)) != 0;
             tick_acc += e * (is_pal ? 6 : 5);
             while (tick_acc >= 5 && alive && budget-- && !skip) {
                 tick_acc -= 5;
                 alive = fmv_step();
                 /* a press latched while that tick ran (a picture change can
                  * take 15+ frames) skips at once rather than a pass later */
-                if (keys_pressed_latch & PORT_A_KEY_1) skip = 1;
+                if (keys_pressed_latch & (PORT_A_KEY_1 | PORT_A_KEY_2)) skip = 1;
             }
             ticks_behind = tick_acc / 5;
             if (tick_acc > 200) tick_acc = 200;    /* 40-tick cap; the 3-step budget stops spirals */
