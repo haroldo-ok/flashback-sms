@@ -1474,6 +1474,45 @@ void logic_start(unsigned char level_index)
     logic_running = 1;
 }
 
+/* Next object at or after `p` with flags bit 2 (active), or NULL once
+ * s_scan_left objects have been passed.  In C each skipped object cost ~270
+ * cycles (the loop state lives in ix slots), and both per-frame loops skip
+ * most of the table.  The asm hard-codes the LivePGE layout, checked here. */
+typedef char livepge_size_check[(sizeof(LivePGE) == 19) ? 1 : -1];
+typedef char livepge_flags_check[(__builtin_offsetof(LivePGE, flags) == 17) ? 1 : -1];
+static unsigned char s_scan_left;
+
+static LivePGE *scan_active(LivePGE *p) __naked
+{
+    (void)p;
+    __asm
+    ld   a, (_s_scan_left)
+    or   a, a
+    jr   z, 00003$
+    ld   b, a
+    ld   de, #17
+    add  hl, de
+    ld   de, #19
+00001$:
+    bit  2, (hl)
+    jr   nz, 00002$
+    add  hl, de
+    djnz 00001$
+    xor  a, a
+    ld   (_s_scan_left), a
+00003$:
+    ld   de, #0
+    ret
+00002$:
+    ld   a, b
+    ld   (_s_scan_left), a
+    ld   de, #-17
+    add  hl, de
+    ex   de, hl
+    ret
+    __endasm;
+}
+
 /* an object's type from the level data (3 = collectible), for the renderer */
 unsigned char logic_object_type(unsigned char idx)
 {
@@ -1514,24 +1553,22 @@ unsigned char logic_step(void)
         }
     }
     {
-        LivePGE *p2 = pge_live;
-        unsigned char n = (unsigned char)pge_num, room = s_room;
-        for (; n; n--, p2++)
-            if ((p2->flags & 4) && p2->room_location != room)
+        LivePGE *p2;
+        s_scan_left = (unsigned char)pge_num;
+        for (p2 = scan_active(pge_live); p2; s_scan_left--, p2 = scan_active(p2 + 1))
+            if (p2->room_location != s_room)
                 col_prepare_piege_state(p2);
     }
     col_prepare_room_state();
 
     {
-        LivePGE *p3 = pge_live;
-        unsigned char n = (unsigned char)pge_num;
-        for (; n; n--, p3++) {
-            if (p3->flags & 4) {
-                s_grid_y = div36(p3->pos_y) & ~1;
-                s_grid_x = (p3->pos_x + 8) >> 4;
-                pge_process(p3);
-                if (logic_bad_op) break;
-            }
+        LivePGE *p3;
+        s_scan_left = (unsigned char)pge_num;
+        for (p3 = scan_active(pge_live); p3; s_scan_left--, p3 = scan_active(p3 + 1)) {
+            s_grid_y = div36(p3->pos_y) & ~1;
+            s_grid_x = (p3->pos_x + 8) >> 4;
+            pge_process(p3);
+            if (logic_bad_op) break;
         }
     }
     /* end of frame: the engine makes Conrad's room the current one here,
