@@ -34,7 +34,6 @@ unsigned char pge_loaded;
 unsigned char self_test;
 unsigned char return_to_sim;
 unsigned char start_after_clip;
-unsigned int  skip_prev;         /* pad state at the previous poll, for a true edge */
 unsigned char level_sel;         /* 0..4: the level chosen on the title screen */
 /* levels 4 and 5 are two parts each; a game starts at the first of them */
 static const unsigned char level_start[5] = { 0, 1, 2, 3, 5 };
@@ -44,8 +43,32 @@ unsigned int  ticks_behind;             /* cutscene lag in ticks (tests) */
 
 volatile unsigned char watchdog;     /* frames since the main loop last ran */
 
+/* The pad as the frame interrupt saw it (SMSlib reads it just before calling
+ * us), kept until the main loop takes it.  Reading the pad only when the
+ * loop gets round to it lost presses: one pass can outlast a whole tap (a
+ * cutscene picture change takes 15+ frames, a game tick over 2). */
+static volatile unsigned int keys_pressed_latch;   /* new presses */
+static volatile unsigned int keys_held_latch;      /* down at any point */
+
+/* the buttons newly pressed since the last call */
+static unsigned int input_take_presses(void)
+{
+    unsigned int p;
+    __critical { p = keys_pressed_latch; keys_pressed_latch = 0; }
+    return p;
+}
+
+unsigned int input_take_held(void)
+{
+    unsigned int h;
+    __critical { h = keys_held_latch; keys_held_latch = 0; }
+    return h;
+}
+
 static void frame_irq(void)
 {
+    keys_pressed_latch |= SMS_getKeysPressed();
+    keys_held_latch |= SMS_getKeysStatus();
     frames_elapsed++;
     /* If a frame never finishes, say so instead of sitting on a black screen:
      * a red backdrop means the game is stuck, not that nothing is happening. */
@@ -122,7 +145,7 @@ static void enter_title(void)
 
 static void play_clip(unsigned char clip)
 {
-    skip_prev = 0xFFFF;              /* a button held from the menu is not a press */
+    input_take_presses();            /* the press that started it is not a skip */
 #if HAS_MUSIC
     {   /* the score the game itself uses for this cutscene */
         unsigned char id = fmv_clip_id[clip];
@@ -174,7 +197,7 @@ static void clip_finished(void)
 
 void main(void)
 {
-    unsigned int keys, pressed;
+    unsigned int pressed;
     unsigned char tick_acc = 0, e;
 
     SMS_displayOff();
@@ -225,8 +248,7 @@ void main(void)
             SMS_waitForVBlank();
             waited = 1;
         }
-        keys = SMS_getKeysStatus();
-        pressed = SMS_getKeysPressed();
+        pressed = input_take_presses();
 
         /* real frames since the last loop (a heavy tick can overrun one) */
         e = frames_elapsed; frames_elapsed = 0;
@@ -245,32 +267,19 @@ void main(void)
             /* streams are 60 Hz ticks: run 5 (NTSC) or 6 (PAL) ticks per 5
              * frames, and catch up after an overrun during the cheap wait
              * ticks that follow each ~12 fps picture change */
-            unsigned char alive = 1, budget = 3, skip = 0;
+            unsigned char alive = 1, budget = 3, skip = (pressed & PORT_A_KEY_1) != 0;
             tick_acc += e * (is_pal ? 6 : 5);
-            while (tick_acc >= 5 && alive && budget--) {
+            while (tick_acc >= 5 && alive && budget-- && !skip) {
                 tick_acc -= 5;
                 alive = fmv_step();
-                /* Poll the skip button between ticks: at a shot cut one pass
-                 * of this loop can run for 15+ frames, long enough for a whole
-                 * press to fall between two polls.  It is a real edge against
-                 * the previous poll - a button still held from the title
-                 * screen counts as down, so it cannot skip the level's intro. */
-                {
-                    unsigned int k = SMS_getKeysStatus();
-                    if ((k & PORT_A_KEY_1) && !(skip_prev & PORT_A_KEY_1)) { skip = 1; skip_prev = k; break; }
-                    skip_prev = k;
-                }
+                /* a press latched while that tick ran (a picture change can
+                 * take 15+ frames) skips at once rather than a pass later */
+                if (keys_pressed_latch & PORT_A_KEY_1) skip = 1;
             }
             ticks_behind = tick_acc / 5;
             if (tick_acc > 200) tick_acc = 200;    /* 40-tick cap; the 3-step budget stops spirals */
-            {   /* a fresh read: `keys` was taken before the ticks above ran,
-                 * and comparing that stale value against the newer poll made a
-                 * release look like a press */
-                unsigned int k = SMS_getKeysStatus();
-                if ((k & PORT_A_KEY_1) && !(skip_prev & PORT_A_KEY_1)) skip = 1;
-                skip_prev = k;
-            }
             if (skip) {
+                input_take_presses();               /* it must not also start the next screen */
                 if (seq_pos < INTRO_LEN) seq_pos = INTRO_LEN - 1;   /* skip the rest of the intro */
                 alive = 0;
             }

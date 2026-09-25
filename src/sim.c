@@ -513,6 +513,7 @@ void sim_start(unsigned char level_index)
     slot_next = 0;
     sim_uploads = 0;
     sim_room = 0xFF;
+    input_take_held();                          /* the press that started the level */
     SMS_useFirstHalfTilesforSprites(1);
     SMS_setSpriteMode(SPRITEMODE_TALL);
     load_room(logic_cur_room);
@@ -522,7 +523,9 @@ void sim_start(unsigned char level_index)
  * 1 up, 2 down, 4 left, 8 right, 0x10/0x20/0x40 the three action keys */
 static unsigned char pad_mask(void)
 {
-    unsigned int k = SMS_getKeysStatus();
+    /* a button down at any frame since the last tick counts: a tick takes
+     * over 2 frames, and a quick tap could fall between two reads */
+    unsigned int k = SMS_getKeysStatus() | input_take_held();
     unsigned char m = 0;
     if (k & PORT_A_KEY_UP)    m |= 1;
     if (k & PORT_A_KEY_DOWN)  m |= 2;
@@ -544,6 +547,7 @@ void sim_resume(void)
     unsigned char i;
     for (i = 0; i < SPR_SLOTS; i++) { slot_tile[i] = 0xFFFF; slot_bot[i] = 0xFFFF; slot_used[i] = 0; }
     slot_next = 0;
+    input_take_held();                          /* nothing held during the cutscene */
     SMS_useFirstHalfTilesforSprites(1);
     SMS_setSpriteMode(SPRITEMODE_TALL);
     sim_room = 0xFF;                            /* forces the room to reload */
