@@ -124,7 +124,8 @@ static unsigned char slot_for(unsigned int top, unsigned int bot) __naked
 
 /* Draw dp_count sprite parts of one object, starting at `pp` in ROM bank
  * dp_bank: each part is (u16 top, u16 bottom, i8 dx, i8 dy) and is drawn at
- * (dp_px + dx, dp_py + dy) when that is on screen (x 0..248, y 1..176),
+ * (dp_px + dx, dp_py + dy) when any of it is on screen (x 0..248, y -15..191:
+ * the VDP clips an 8x16 sprite at the bottom edge and wraps one at the top),
  * stopping at 60 sprites (dp_n).  Uploading a new tile maps other banks, so
  * the parts' bank is mapped again for each part.  In asm - it runs for every
  * sprite part of every frame. */
@@ -174,12 +175,18 @@ static void draw_parts(const unsigned char *pp) __naked
     add  hl, de
     ld   a, h
     or   a, a
-    jr   nz, 00009$             ; y < 0 or > 255
+    jr   z, 00002$
+    inc  a
+    jr   nz, 00009$             ; y < -256 or > 255
     ld   a, l
-    or   a, a
-    jr   z, 00009$              ; y < 1
-    cp   a, #177
-    jr   nc, 00009$             ; y > 176
+    cp   a, #241
+    jr   c, 00009$              ; y < -15: entirely above the screen
+    jr   00003$
+00002$:
+    ld   a, l
+    cp   a, #192
+    jr   nc, 00009$             ; y > 191: entirely below the screen
+00003$:
     ld   (_dp_y), a
     ld   hl, (_dp_ptr)
     ld   e, (hl)
