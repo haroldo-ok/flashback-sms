@@ -237,7 +237,9 @@ def pack(a):
     if a.sprsets:
         import tilepack as TP
         sp = pickle.load(open(a.sprsets, 'rb'))
-        remap, regions, starts = TP.build(sp['tiles'])
+        # sprite tiles stream into VRAM every frame while things animate, so
+        # they are stored raw: a straight copy, no plane rebuilding
+        remap, regions, starts = TP.build(sp['tiles'], raw=True)
         banks = []
         for ty in (0, 1, 2, 3):
             b.align_bank()

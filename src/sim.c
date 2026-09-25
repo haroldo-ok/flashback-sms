@@ -36,16 +36,15 @@ static unsigned int rd16(const unsigned char *p)
 /* an 8x16 sprite is two 8x8 tiles from the shared compact dictionary; the
  * VRAM slot cache is keyed on the pair */
 static unsigned int slot_bot[SPR_SLOTS];
+static unsigned int sf_bot;
 
-static unsigned char slot_for(unsigned int top, unsigned int bot)
+/* the miss path of slot_for: upload into a slot not needed this frame */
+static unsigned char slot_alloc(unsigned int top, unsigned int bot)
 {
     unsigned char i, s;
     for (i = 0; i < SPR_SLOTS; i++) {
-        if (slot_tile[i] == top && slot_bot[i] == bot) { slot_used[i] = 1; return i; }
-    }
-    for (i = 0; i < SPR_SLOTS; i++) {          /* a slot not needed this frame */
         s = slot_next;
-        slot_next = (unsigned char)((slot_next + 1) % SPR_SLOTS);
+        if (++slot_next == SPR_SLOTS) slot_next = 0;
         if (!slot_used[s]) {
             tile_upload(&spr_dict, top, s << 1);
             tile_upload(&spr_dict, bot, (s << 1) + 1);
@@ -59,19 +58,373 @@ static unsigned char slot_for(unsigned int top, unsigned int bot)
     return 0xFF;                                /* every slot is in use */
 }
 
-/* Which sprite set draws this object: level objects, Conrad, or - for the
- * animation numbers the monsters share - the monster type the level assigns
- * to this object (the engine's loadMonsterSprites, worked out at build time). */
-static unsigned char sprite_set(const LivePGE *pge)
+#if SPR_SLOTS != 24
+#error slot_for below hard-codes 24 slots
+#endif
+
+/* The VRAM slot already holding this (top, bottom) pair, marked used; else
+ * slot_alloc.  In asm: the C search compared two 16-bit keys through ix
+ * slots, ~150 cycles per slot for every sprite part drawn.  This tests the
+ * top key's low byte first, ~45 cycles per slot. */
+static unsigned char slot_for(unsigned int top, unsigned int bot) __naked
 {
-    unsigned char m;
-    if (pge->flags & 8) return 5;
-    if (pge->anim_number >= 0x22F && pge->anim_number < 0x28E) {
-        SMS_mapROMBank(spr_mon_bank[logic_level]);
-        m = *(const unsigned char *)(spr_mon_addr[logic_level] + pge->index);
-        return (m == 0xFF) ? 0xFF : (unsigned char)(1 + m);
-    }
-    return 0;
+    (void)top; (void)bot;
+    __asm
+    ld   (_sf_bot), de
+    ex   de, hl                 ; de = top
+    ld   hl, #_slot_tile
+    ld   b, #24
+00001$:
+    ld   a, (hl)
+    inc  hl
+    cp   a, e
+    jr   z, 00004$
+00005$:
+    inc  hl
+    djnz 00001$
+    ex   de, hl                 ; miss: hl = top, de = bot
+    ld   de, (_sf_bot)
+    jp   _slot_alloc
+00004$:
+    ld   a, (hl)
+    cp   a, d
+    jr   nz, 00005$
+    ld   a, #24                 ; top matches: slot = 24 - b
+    sub  a, b
+    ld   c, a
+    push hl
+    push de
+    ld   l, c
+    ld   h, #0
+    add  hl, hl
+    ld   de, #_slot_bot
+    add  hl, de
+    ld   de, (_sf_bot)
+    ld   a, (hl)
+    cp   a, e
+    jr   nz, 00006$
+    inc  hl
+    ld   a, (hl)
+    cp   a, d
+    jr   nz, 00006$
+    pop  de
+    pop  hl
+    ld   hl, #_slot_used
+    ld   b, #0
+    add  hl, bc
+    ld   (hl), #1
+    ld   a, c
+    ret
+00006$:
+    pop  de
+    pop  hl
+    jr   00005$
+    __endasm;
+}
+
+/* Draw dp_count sprite parts of one object, starting at `pp` in ROM bank
+ * dp_bank: each part is (u16 top, u16 bottom, i8 dx, i8 dy) and is drawn at
+ * (dp_px + dx, dp_py + dy) when any of it is on screen (x 0..248, y -15..191:
+ * the VDP clips an 8x16 sprite at the bottom edge and wraps one at the top),
+ * stopping at 60 sprites (dp_n).  Uploading a new tile maps other banks, so
+ * the parts' bank is mapped again for each part.  In asm - it runs for every
+ * sprite part of every frame. */
+static unsigned char dp_count, dp_bank, dp_n, dp_x, dp_y;
+static int dp_px, dp_py;
+static const unsigned char *dp_ptr;
+
+static void draw_parts(const unsigned char *pp) __naked
+{
+    (void)pp;
+    __asm
+    ld   a, (_dp_count)
+    or   a, a
+    ret  z
+    ld   (_dp_ptr), hl
+00001$:
+    ld   a, (_dp_n)
+    cp   a, #60
+    ret  nc
+    ld   a, (_dp_bank)
+    ld   (_ROM_bank_to_be_mapped_on_slot2), a
+    ld   hl, (_dp_ptr)
+    ld   de, #4
+    add  hl, de
+    ld   a, (hl)                ; dx
+    ld   e, a
+    rlca
+    sbc  a, a
+    ld   d, a
+    inc  hl
+    ld   c, (hl)                ; dy
+    ld   hl, (_dp_px)
+    add  hl, de
+    ld   a, h
+    or   a, a
+    jr   nz, 00009$             ; x < 0 or > 255
+    ld   a, l
+    cp   a, #249
+    jr   nc, 00009$             ; x > 248
+    ld   (_dp_x), a
+    ld   a, c
+    ld   e, a
+    rlca
+    sbc  a, a
+    ld   d, a
+    ld   hl, (_dp_py)
+    add  hl, de
+    ld   a, h
+    or   a, a
+    jr   z, 00002$
+    inc  a
+    jr   nz, 00009$             ; y < -256 or > 255
+    ld   a, l
+    cp   a, #241
+    jr   c, 00009$              ; y < -15: entirely above the screen
+    jr   00003$
+00002$:
+    ld   a, l
+    cp   a, #192
+    jr   nc, 00009$             ; y > 191: entirely below the screen
+00003$:
+    ld   (_dp_y), a
+    ld   hl, (_dp_ptr)
+    ld   e, (hl)
+    inc  hl
+    ld   d, (hl)                ; top
+    inc  hl
+    ld   c, (hl)
+    inc  hl
+    ld   b, (hl)                ; bottom
+    ex   de, hl
+    ld   e, c
+    ld   d, b
+    call _slot_for              ; a = VRAM slot, 0xFF if none free
+    cp   a, #0xff
+    jr   z, 00009$
+    add  a, a
+    ld   e, a                   ; tile = slot * 2
+    ld   a, (_dp_x)
+    ld   d, a
+    ld   a, (_dp_y)
+    ld   l, a
+    ld   h, #0
+    call _SMS_addSprite_f
+    ld   hl, #_dp_n
+    inc  (hl)
+00009$:
+    ld   hl, (_dp_ptr)
+    ld   de, #6
+    add  hl, de
+    ld   (_dp_ptr), hl
+    ld   hl, #_dp_count
+    dec  (hl)
+    jr   nz, 00001$
+    ret
+    __endasm;
+}
+
+#if MAX_PARTS != 40
+#error draw_objects below hard-codes MAX_PARTS 40
+#endif
+
+/* Draw the active objects of the current room, from the interpreter's own
+ * room list, into hardware sprites (at most 60, counted in dp_n).  Per
+ * object, in asm; the C it implements:
+ *   skip unless flags bit 2 (active) and room_location == sim_room
+ *   set = flags & 8 ? 5 (level objects)
+ *       : anim in 0x22F..0x28D ? 1 + the level's monster type for this object
+ *                                (0xFF: no sprites, skip)
+ *       : 0 (Conrad)
+ *   skip unless spr_tab_lo[set] <= anim <= spr_tab_hi[set]
+ *   entry = spr_tab_addr[set] + ((anim - lo) * 2 + mirror) * 3 in bank
+ *   spr_tab_bank[set]: u8 bank (0 = none), u16 address of u8 count + parts
+ *   draw_parts(min(count, 40) parts) at (pos_x, pos_y - sim_scroll)
+ * mirror is flags bit 1 (the effective mirror, not the facing bit). */
+static unsigned char do_it, do_guard;
+
+static void draw_objects(void) __naked
+{
+    __asm
+    push ix
+    ld   a, (_sim_room)
+    cp   a, #64
+    jp   nc, 00099$
+    ld   e, a
+    ld   d, #0
+    ld   hl, #_room_head
+    add  hl, de
+    ld   a, #255
+    ld   (_do_guard), a
+    ld   a, (hl)
+00001$:
+    cp   a, #0xff
+    jp   z, 00099$
+    ld   (_do_it), a
+    ld   a, (_dp_n)
+    cp   a, #60
+    jp   nc, 00099$
+    ld   hl, #_do_guard
+    ld   a, (hl)
+    or   a, a
+    jp   z, 00099$
+    dec  (hl)
+    ld   a, (_do_it)
+    ld   l, a
+    ld   h, #0
+    ld   e, l
+    ld   d, h
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, de
+    add  hl, de
+    add  hl, de
+    ld   de, #_pge_live
+    add  hl, de
+    push hl
+    pop  ix                     ; ix = the object
+    bit  2, 17 (ix)
+    jp   z, 00090$
+    ld   a, (_sim_room)
+    cp   a, 15 (ix)
+    jp   nz, 00090$
+    bit  3, 17 (ix)             ; which sprite set
+    jr   z, 00002$
+    ld   a, #5
+    jr   00005$
+00002$:
+    ld   l, 6 (ix)
+    ld   h, 7 (ix)
+    ld   de, #0x22f
+    or   a, a
+    sbc  hl, de
+    jr   c, 00004$
+    ld   de, #0x5f
+    or   a, a
+    sbc  hl, de
+    jr   nc, 00004$
+    ld   a, (_logic_level)      ; a monster: its type for this level part
+    ld   e, a
+    ld   d, #0
+    ld   hl, #_spr_mon_bank
+    add  hl, de
+    ld   a, (hl)
+    ld   (_ROM_bank_to_be_mapped_on_slot2), a
+    ld   hl, #_spr_mon_addr
+    add  hl, de
+    add  hl, de
+    ld   a, (hl)
+    inc  hl
+    ld   h, (hl)
+    ld   l, a
+    ld   e, 18 (ix)
+    ld   d, #0
+    add  hl, de
+    ld   a, (hl)
+    cp   a, #0xff
+    jp   z, 00090$
+    inc  a
+    jr   00005$
+00004$:
+    xor  a, a                   ; Conrad
+00005$:
+    ld   e, a
+    ld   d, #0                  ; de = set
+    ld   hl, #_spr_tab_lo
+    add  hl, de
+    add  hl, de
+    ld   c, (hl)
+    inc  hl
+    ld   b, (hl)                ; lo
+    ld   l, 6 (ix)
+    ld   h, 7 (ix)
+    or   a, a
+    sbc  hl, bc
+    jp   c, 00090$              ; anim < lo
+    push hl                     ; anim - lo
+    ld   hl, #_spr_tab_hi
+    add  hl, de
+    add  hl, de
+    ld   a, (hl)
+    inc  hl
+    ld   h, (hl)
+    ld   l, a
+    ld   c, 6 (ix)
+    ld   b, 7 (ix)
+    or   a, a
+    sbc  hl, bc
+    pop  hl
+    jp   c, 00090$              ; anim > hi
+    add  hl, hl
+    bit  1, 17 (ix)
+    jr   z, 00006$
+    inc  hl
+00006$:
+    ld   c, l
+    ld   b, h
+    add  hl, hl
+    add  hl, bc                 ; entry * 3
+    push hl
+    ld   hl, #_spr_tab_bank
+    add  hl, de
+    ld   a, (hl)
+    ld   (_ROM_bank_to_be_mapped_on_slot2), a
+    ld   hl, #_spr_tab_addr
+    add  hl, de
+    add  hl, de
+    ld   a, (hl)
+    inc  hl
+    ld   h, (hl)
+    ld   l, a
+    pop  bc
+    add  hl, bc
+    ld   a, (hl)                ; bank of the parts
+    or   a, a
+    jr   z, 00090$
+    ld   (_dp_bank), a
+    inc  hl
+    ld   e, (hl)
+    inc  hl
+    ld   d, (hl)
+    ld   (_ROM_bank_to_be_mapped_on_slot2), a
+    ex   de, hl
+    ld   a, (hl)                ; part count
+    inc  hl
+    cp   a, #41
+    jr   c, 00007$
+    ld   a, #40
+00007$:
+    ld   (_dp_count), a
+    ld   c, 2 (ix)
+    ld   b, 3 (ix)
+    ld   (_dp_px), bc
+    ld   c, 4 (ix)
+    ld   b, 5 (ix)
+    ld   a, (_sim_scroll)
+    push hl
+    ld   l, c
+    ld   h, b
+    ld   c, a
+    ld   b, #0
+    or   a, a
+    sbc  hl, bc
+    ld   (_dp_py), hl
+    pop  hl
+    call _draw_parts
+00090$:
+    ld   a, (_do_it)
+    ld   e, a
+    ld   d, #0
+    ld   hl, #_next_in_room
+    add  hl, de
+    ld   a, (hl)
+    jp   00001$
+00099$:
+    pop  ix
+    ret
+    __endasm;
 }
 
 /* The engine draws collectibles over the foreground scenery (its blit that
@@ -102,6 +455,72 @@ static void unhide_items(unsigned char idx, unsigned char room)
     }
 }
 
+#if DEBUG_PAD
+/* Input debugging (make DEBUG_PAD=1): a row of markers at the top left shows
+ * the pad the game logic received this tick - left, right, up, down, then
+ * button 1 and button 2.  Tile 48 is free while playing: sprites stream
+ * through 0..47 and rooms start at 64.  Cutscenes overwrite it, so it is
+ * uploaded again with every room. */
+#define DEBUG_TILE 48
+static void debug_pad_tiles(void)
+{
+    unsigned char t[32], r, k, best = 1, lum, top = 0;
+    for (k = 1; k < 16; k++) {            /* the brightest sprite colour */
+        unsigned char c = spr_palette[k];
+        lum = (c & 3) + ((c >> 2) & 3) + ((c >> 4) & 3);
+        if (lum > top) { top = lum; best = k; }
+    }
+    for (r = 0; r < 8; r++)
+        for (k = 0; k < 4; k++)
+            t[r * 4 + k] = (r >= 1 && r <= 6 && ((best >> k) & 1)) ? 0x7E : 0;
+    SMS_loadTiles(t, DEBUG_TILE, 32);
+    for (k = 0; k < 32; k++) t[k] = 0;
+    SMS_loadTiles(t, DEBUG_TILE + 1, 32);
+}
+
+static void debug_pad_draw(void)
+{
+    static const unsigned char bit[6] = { 4, 8, 1, 2, 0x40, 0x20 };
+    static const unsigned char xs[6] = { 8, 18, 28, 38, 56, 66 };
+    unsigned char i;
+    for (i = 0; i < 6; i++)
+        if (logic_pad_mask & bit[i]) SMS_addSprite(xs[i], 2, DEBUG_TILE);
+}
+#endif
+
+/* The camera.  The room is 224 lines and the screen 192, so the view scrolls
+ * by up to ROOM_SCROLL_MAX.  It follows the floor Conrad is on (the engine
+ * stands characters at y 70, 142 and 214), not his pos_y: that moves with
+ * every animation frame's own offset - walking bobs, stepping down a ledge
+ * rises before it drops - and following it made the screen jitter.  The
+ * floor only changes once he is well away from it, and the view then glides
+ * there; a new room starts at its target at once. */
+#define CAM_STEP 2                      /* lines per game tick */
+static int cam_floor;
+static unsigned char cam_snap;
+
+static int nearest_floor(int y)
+{
+    if (y < 106) return 70;
+    if (y < 178) return 142;
+    return 214;
+}
+
+static void update_scroll(void)
+{
+    int y = pge_live[0].pos_y, target;
+    if (cam_snap || y < cam_floor - 48 || y > cam_floor + 48) cam_floor = nearest_floor(y);
+    target = cam_floor - 120;
+    if (target < 0) target = 0;
+    if (target > ROOM_SCROLL_MAX) target = ROOM_SCROLL_MAX;
+    if (cam_snap) sim_scroll = (unsigned char)target;
+    else if (sim_scroll + CAM_STEP <= target) sim_scroll += CAM_STEP;
+    else if (sim_scroll >= target + CAM_STEP) sim_scroll -= CAM_STEP;
+    else sim_scroll = (unsigned char)target;
+    cam_snap = 0;
+    SMS_setBGScrollY(sim_scroll);
+}
+
 static void load_room(unsigned char room)
 {
     unsigned char idx = room_find(part_map[logic_level], room);
@@ -112,6 +531,10 @@ static void load_room(unsigned char room)
     SMS_loadSpritePalette(spr_palette);
     SMS_displayOn();
     sim_room = room;
+    cam_snap = 1;
+#if DEBUG_PAD
+    debug_pad_tiles();
+#endif
     for (idx = 0; idx < SPR_SLOTS; idx++) { slot_tile[idx] = 0xFFFF; slot_bot[idx] = 0xFFFF; }
 }
 
@@ -126,6 +549,7 @@ void sim_start(unsigned char level_index)
     slot_next = 0;
     sim_uploads = 0;
     sim_room = 0xFF;
+    input_take_held();                          /* the press that started the level */
     SMS_useFirstHalfTilesforSprites(1);
     SMS_setSpriteMode(SPRITEMODE_TALL);
     load_room(logic_cur_room);
@@ -135,7 +559,9 @@ void sim_start(unsigned char level_index)
  * 1 up, 2 down, 4 left, 8 right, 0x10/0x20/0x40 the three action keys */
 static unsigned char pad_mask(void)
 {
-    unsigned int k = SMS_getKeysStatus();
+    /* a button down at any frame since the last tick counts: a tick takes
+     * over 2 frames, and a quick tap could fall between two reads */
+    unsigned int k = SMS_getKeysStatus() | input_take_held();
     unsigned char m = 0;
     if (k & PORT_A_KEY_UP)    m |= 1;
     if (k & PORT_A_KEY_DOWN)  m |= 2;
@@ -157,6 +583,7 @@ void sim_resume(void)
     unsigned char i;
     for (i = 0; i < SPR_SLOTS; i++) { slot_tile[i] = 0xFFFF; slot_bot[i] = 0xFFFF; slot_used[i] = 0; }
     slot_next = 0;
+    input_take_held();                          /* nothing held during the cutscene */
     SMS_useFirstHalfTilesforSprites(1);
     SMS_setSpriteMode(SPRITEMODE_TALL);
     sim_room = 0xFF;                            /* forces the room to reload */
@@ -164,68 +591,21 @@ void sim_resume(void)
 
 void sim_step(void)
 {
-    unsigned int off, tid, bot;
-    unsigned char it, guard, set, ebank;
-    unsigned char n, k, s, facing, count;
-    int x, y;
-    const unsigned char *p;
-    LivePGE *pge;
-    unsigned char *pp;
+    unsigned char n, k;
 
     logic_pad_mask = pad_mask();
     logic_step();
     if (logic_cur_room != sim_room) load_room(logic_cur_room);
-
-    y = pge_live[0].pos_y - 120;
-    if (y < 0) y = 0;
-    if (y > ROOM_SCROLL_MAX) y = ROOM_SCROLL_MAX;
-    sim_scroll = (unsigned char)y;
-    SMS_setBGScrollY(sim_scroll);
+    update_scroll();
 
     for (k = 0; k < SPR_SLOTS; k++) slot_used[k] = 0;
     SMS_initSprites();
-    n = 0;
-    /* only the objects of this room, from the interpreter's own room list,
-     * instead of scanning all of them every frame */
-    guard = 0;
-    for (it = (sim_room < 64) ? room_head[sim_room] : 0xFF;
-         it != 0xFF && it < MAX_PGE && n < 60 && guard++ < MAX_PGE;
-         it = next_in_room[it]) {
-        pge = &pge_live[it];
-        if (!(pge->flags & 4) || pge->room_location != sim_room) continue;
-        set = sprite_set(pge);
-        if (set == 0xFF) continue;
-        if (pge->anim_number < spr_tab_lo[set] || pge->anim_number > spr_tab_hi[set]) continue;
-        /* bit 1 mirrors the sprite */
-        facing = (pge->flags & 2) >> 1;
-        SMS_mapROMBank(spr_tab_bank[set]);
-        {
-            unsigned int e = ((pge->anim_number - spr_tab_lo[set]) << 1) + facing;
-            p = (const unsigned char *)(spr_tab_addr[set] + e * 3);
-        }
-        ebank = p[0];
-        if (!ebank) continue;
-        off = rd16(p + 1);
-        SMS_mapROMBank(ebank);
-        p = (const unsigned char *)off;
-        count = *p++;
-        if (count > MAX_PARTS) count = MAX_PARTS;
-        /* read each part straight from ROM: uploading pages other banks in,
-         * so map this one back each time */
-        for (k = 0; k < count && n < 60; k++) {
-            SMS_mapROMBank(ebank);
-            pp = (unsigned char *)(p + k * 6);
-            tid = (unsigned int)pp[0] | ((unsigned int)pp[1] << 8);
-            bot = (unsigned int)pp[2] | ((unsigned int)pp[3] << 8);
-            x = pge->pos_x + (signed char)pp[4];
-            y = pge->pos_y + (signed char)pp[5] - sim_scroll;
-            if (x < 0 || x > 248 || y < 1 || y > 176) continue;
-            s = slot_for(tid, bot);
-            if (s == 0xFF) continue;
-            SMS_addSprite((unsigned char)x, (unsigned char)y, s << 1);
-            n++;
-        }
-    }
+    dp_n = 0;
+    draw_objects();
+    n = dp_n;
     sim_sprites = n;
+#if DEBUG_PAD
+    debug_pad_draw();
+#endif
     SMS_copySpritestoSAT();
 }

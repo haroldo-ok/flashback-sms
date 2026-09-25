@@ -493,6 +493,15 @@ int main(int argc, char *argv[]) {
 		g_frameHook = 0;
 		int written = 0;
 		for (int lvl = 0; lvl < 7; ++lvl) {
+			/* the demo ships only some level parts: skip the missing ones */
+			char probe[64];
+			snprintf(probe, sizeof(probe), "%s.PGE", Game::_gameLevels[lvl].name2);
+			bool have = resourceExists(g, &fs, probe);
+			snprintf(probe, sizeof(probe), "%s.MBK", Game::_gameLevels[lvl].name);
+			if (!have || !resourceExists(g, &fs, probe)) {
+				printf("level part %d not in this data, skipped\n", lvl);
+				continue;
+			}
 			g->_demoBin = -1;
 			g->_skillLevel = 1;
 			g->_currentLevel = lvl;
@@ -510,6 +519,11 @@ int main(int argc, char *argv[]) {
 				else {
 					const int m = pass - 2;                 /* monster set 0..3 */
 					if (lvl != 0) continue;
+					snprintf(probe, sizeof(probe), "%s.SPR", Game::_monsterNames[0][m]);
+					if (!resourceExists(g, &fs, probe)) {
+						printf("monster set %s not in this data, skipped\n", Game::_monsterNames[0][m]);
+						continue;
+					}
 					g->_curMonsterNum = m;
 					g->_res.load(Game::_monsterNames[0][m], Resource::OT_SPRM);
 					g->_res.load_SPR_OFF(Game::_monsterNames[0][m], g->_res._sprm);

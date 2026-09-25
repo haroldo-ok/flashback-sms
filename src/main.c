@@ -34,7 +34,6 @@ unsigned char pge_loaded;
 unsigned char self_test;
 unsigned char return_to_sim;
 unsigned char start_after_clip;
-unsigned int  skip_prev;         /* pad state at the previous poll, for a true edge */
 unsigned char level_sel;         /* 0..4: the level chosen on the title screen */
 /* levels 4 and 5 are two parts each; a game starts at the first of them */
 static const unsigned char level_start[5] = { 0, 1, 2, 3, 5 };
@@ -44,8 +43,37 @@ unsigned int  ticks_behind;             /* cutscene lag in ticks (tests) */
 
 volatile unsigned char watchdog;     /* frames since the main loop last ran */
 
+/* The pad as the frame interrupt saw it (SMSlib reads it just before calling
+ * us), kept until the main loop takes it.  Reading the pad only when the
+ * loop gets round to it lost presses: one pass can outlast a whole tap (a
+ * cutscene picture change takes 15+ frames, a game tick over 2). */
+static volatile unsigned int keys_pressed_latch;   /* new presses */
+static volatile unsigned int keys_held_latch;      /* down at any point */
+
+/* frames after the title appears during which presses are ignored: a burst
+ * of presses aimed at the intro should not fall through and start a level */
+#define TITLE_GUARD 15
+static unsigned char title_guard;
+
+/* the buttons newly pressed since the last call */
+static unsigned int input_take_presses(void)
+{
+    unsigned int p;
+    __critical { p = keys_pressed_latch; keys_pressed_latch = 0; }
+    return p;
+}
+
+unsigned int input_take_held(void)
+{
+    unsigned int h;
+    __critical { h = keys_held_latch; keys_held_latch = 0; }
+    return h;
+}
+
 static void frame_irq(void)
 {
+    keys_pressed_latch |= SMS_getKeysPressed();
+    keys_held_latch |= SMS_getKeysStatus();
     frames_elapsed++;
     /* If a frame never finishes, say so instead of sitting on a black screen:
      * a red backdrop means the game is stuck, not that nothing is happening. */
@@ -118,11 +146,18 @@ static void enter_title(void)
 #endif
     SMS_displayOn();
     game_state = ST_TITLE;
+    /* presses made while the intro ended and this loaded were meant for the
+     * intro: without this, mashing the skip button started the game too */
+    input_take_presses();
+    title_guard = TITLE_GUARD;
 }
 
-static void play_clip(unsigned char clip)
+/* discard_presses: the press that led here (starting a level, the game
+ * asking for a cutscene) must not also skip the clip.  The boot's intro keeps
+ * them, so a press made while the ROM starts up skips it. */
+static void play_clip(unsigned char clip, unsigned char discard_presses)
 {
-    skip_prev = 0xFFFF;              /* a button held from the menu is not a press */
+    if (discard_presses) input_take_presses();
 #if HAS_MUSIC
     {   /* the score the game itself uses for this cutscene */
         unsigned char id = fmv_clip_id[clip];
@@ -167,22 +202,24 @@ static void clip_finished(void)
         unsigned char c;
         seq_pos++;
         c = next_intro_clip();
-        if (c != 0xFF) { play_clip(c); return; }
+        if (c != 0xFF) { play_clip(c, 0); return; }
     }
     enter_title();
 }
 
 void main(void)
 {
-    unsigned int keys, pressed;
+    unsigned int pressed;
     unsigned char tick_acc = 0, e;
 
     SMS_displayOff();
     SMS_useFirstHalfTilesforSprites(1);
     SMS_setSpriteMode(SPRITEMODE_NORMAL);
     hide_sprites();
-    is_pal = detect_pal();
+    /* installed first, so a press during the PAL check (the first ~12
+     * frames) is latched and skips the intro like any other */
     SMS_setFrameInterruptHandler(frame_irq);
+    is_pal = detect_pal();
 
     /* The self-test builds every level's object table and runs the ported
      * interpreter against the recorded demo - about a minute with nothing on
@@ -212,52 +249,52 @@ void main(void)
     {   /* a build without cutscenes starts in the room viewer */
         unsigned char c0 = (FMV_NUM_CLIPS > 0) ? next_intro_clip() : 0xFF;
         if (c0 == 0xFF) { seq_pos = INTRO_LEN; enter_title(); }
-        else play_clip(c0);
+        else play_clip(c0, 0);
     }
 
     for (;;) {
+        /* A game tick still takes longer than its 2 frames, so one is nearly
+         * always due: waiting for the next vblank first only wasted up to a
+         * frame per pass.  Wait only when there is nothing to run yet. */
+        unsigned char waited = 0, n;
         watchdog = 0;
-        SMS_waitForVBlank();
-        music_frame();                 /* one 60 Hz step of the score */
-        sfx_frame();
-        keys = SMS_getKeysStatus();
-        pressed = SMS_getKeysPressed();
+        if (game_state != ST_SIM || tick_acc + frames_elapsed < 2) {
+            SMS_waitForVBlank();
+            waited = 1;
+        }
+        pressed = input_take_presses();
 
         /* real frames since the last loop (a heavy tick can overrun one) */
         e = frames_elapsed; frames_elapsed = 0;
-        if (!e) e = 1;
+        if (!e && waited) e = 1;
         if (e > 12) e = 12;
+        /* the score and effects advance one 60 Hz step per frame that passed:
+         * the loop no longer runs once per frame, and their tempo must not
+         * follow the game's speed */
+        for (n = e; n; n--) { music_frame(); sfx_frame(); }
+
+        /* PAUSE only means something while playing; one pressed on the title
+         * or during a cutscene would otherwise quit the game on its first frame */
+        if (game_state != ST_SIM && SMS_queryPauseRequested()) SMS_resetPauseRequest();
 
         if (game_state == ST_CUTSCENE) {
             /* streams are 60 Hz ticks: run 5 (NTSC) or 6 (PAL) ticks per 5
              * frames, and catch up after an overrun during the cheap wait
              * ticks that follow each ~12 fps picture change */
-            unsigned char alive = 1, budget = 3, skip = 0;
+            /* either button skips, as either starts a level on the title */
+            unsigned char alive = 1, budget = 3, skip = (pressed & (PORT_A_KEY_1 | PORT_A_KEY_2)) != 0;
             tick_acc += e * (is_pal ? 6 : 5);
-            while (tick_acc >= 5 && alive && budget--) {
+            while (tick_acc >= 5 && alive && budget-- && !skip) {
                 tick_acc -= 5;
                 alive = fmv_step();
-                /* Poll the skip button between ticks: at a shot cut one pass
-                 * of this loop can run for 15+ frames, long enough for a whole
-                 * press to fall between two polls.  It is a real edge against
-                 * the previous poll - a button still held from the title
-                 * screen counts as down, so it cannot skip the level's intro. */
-                {
-                    unsigned int k = SMS_getKeysStatus();
-                    if ((k & PORT_A_KEY_1) && !(skip_prev & PORT_A_KEY_1)) { skip = 1; skip_prev = k; break; }
-                    skip_prev = k;
-                }
+                /* a press latched while that tick ran (a picture change can
+                 * take 15+ frames) skips at once rather than a pass later */
+                if (keys_pressed_latch & (PORT_A_KEY_1 | PORT_A_KEY_2)) skip = 1;
             }
             ticks_behind = tick_acc / 5;
             if (tick_acc > 200) tick_acc = 200;    /* 40-tick cap; the 3-step budget stops spirals */
-            {   /* a fresh read: `keys` was taken before the ticks above ran,
-                 * and comparing that stale value against the newer poll made a
-                 * release look like a press */
-                unsigned int k = SMS_getKeysStatus();
-                if ((k & PORT_A_KEY_1) && !(skip_prev & PORT_A_KEY_1)) skip = 1;
-                skip_prev = k;
-            }
             if (skip) {
+                input_take_presses();               /* it must not also start the next screen */
                 if (seq_pos < INTRO_LEN) seq_pos = INTRO_LEN - 1;   /* skip the rest of the intro */
                 alive = 0;
             }
@@ -271,7 +308,9 @@ void main(void)
                 sim_step();
             }
             ticks_behind = tick_acc >> 1;
-            if (tick_acc > 100) tick_acc = 100;
+            /* a small backlog only: a bigger one plays back as a fast-forward
+             * burst as soon as a lighter room lets the game catch up */
+            if (tick_acc > 4) tick_acc = 4;
             /* the game can ask for a cutscene (picking up an item does) */
             if (logic_cutscene != 0xFFFF) {
                 unsigned char c = (FMV_NUM_CLIPS > 0) ? fmv_find((unsigned char)logic_cutscene) : 0xFF;
@@ -281,7 +320,7 @@ void main(void)
                     tick_acc = 0;
                     SMS_setSpriteMode(SPRITEMODE_NORMAL);
                     hide_sprites();
-                    play_clip(c);
+                    play_clip(c, 1);
                 }
             }
             /* leave with PAUSE: button 1 is the run key while playing */
@@ -293,6 +332,10 @@ void main(void)
                 enter_title();
             }
         } else {                    /* title screen: pick a level, any button starts it */
+            if (title_guard) {
+                title_guard = (title_guard > e) ? title_guard - e : 0;
+                pressed = 0;
+            }
 #if HAS_MENU
             if ((pressed & PORT_A_KEY_UP) && level_sel) { level_sel--; draw_level_text(); }
             else if ((pressed & PORT_A_KEY_DOWN) && level_sel + 1 < NUM_SEL
@@ -301,7 +344,7 @@ void main(void)
             if (pressed & (PORT_A_KEY_1 | PORT_A_KEY_2)) {
                 unsigned char lv = level_start[level_sel];
                 unsigned char c = fmv_find(level_cutscene[lv]);
-                if (c != 0xFF) { start_after_clip = 1; play_clip(c); }
+                if (c != 0xFF) { start_after_clip = 1; play_clip(c, 1); }
                 else { sim_start(level_start[level_sel]); game_state = ST_SIM; }
             }
         }
