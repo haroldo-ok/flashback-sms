@@ -168,6 +168,7 @@ struct Piece {
 };
 static Piece g_pieces[256];
 static int g_pieceCount;
+static int g_scriptKey = -1;
 static FILE *g_traceOut;
 static uint32_t g_traceFrame;
 
@@ -239,6 +240,7 @@ static void traceFrame(Game *g) {
 	}
 	uint8_t inp = (uint8_t)(g->_res._dem && g->_inp_demPos > 0 && g->_inp_demPos <= g->_res._demLen
 	                        ? g->_res._dem[g->_inp_demPos - 1] : 0);
+	if (g_scriptKey >= 0) inp = (uint8_t)g_scriptKey;   /* scripted run: the key we fed in */
 	fputc(inp, g_traceOut);
 	uint16_t n = g_pieceCount;
 	fwrite(&n, 2, 1, g_traceOut);
@@ -687,9 +689,11 @@ int main(int argc, char *argv[]) {
 		const int nkeys = (int)fread(keys, 1, sizeof(keys), sf);
 		fclose(sf);
 		g_traceOps = -1;
-		g->_demoBin = 0;                     /* drive input from our buffer */
-		g->_res._dem = keys;
-		g->_res._demLen = nkeys;
+		/* keys go in through the normal input path, not the demo mechanism: a
+		 * demo start changes the current room DURING level loading, and only
+		 * objects in the current room are switched on at load - so the level's
+		 * own start room (level 4's lift) was never activated that way */
+		g->_demoBin = -1;
 		g->_skillLevel = 1;
 		g->_currentLevel = lvl;
 		g->_randSeed = 0;
@@ -699,13 +703,6 @@ int main(int argc, char *argv[]) {
 		g->clearStateRewind();
 		g->loadLevelData();
 		g->resetGameState();
-		/* undo the demo's start position: begin where the level itself does */
-		LivePGE *c = &g->_pgeLive[0];
-		c->room_location = g->_res._pgeInit[0].init_room;
-		c->pos_x = g->_res._pgeInit[0].pos_x;
-		c->pos_y = g->_res._pgeInit[0].pos_y;
-		g->_currentRoom = c->room_location;
-		g->loadLevelRoom();
 		g->_endLoop = false;
 		char path[512];
 		snprintf(path, sizeof(path), "%s/trace_S%d.fbt", out, lvl);
@@ -715,9 +712,14 @@ int main(int argc, char *argv[]) {
 		g_spriteHook = tracePiece;
 		g_frameHook = traceFrame;
 		g_traceFrame = 0;
-		while (!stub->_pi.quit && !g->_endLoop) {
+		for (int k = 0; k < nkeys && !stub->_pi.quit && !g->_endLoop; ++k) {
+			const uint8_t m = keys[k];
+			stub->_pi.dirMask = m & 0x0F;          /* 1 up, 2 down, 4 left, 8 right */
+			stub->_pi.enter = (m & 0x10) != 0;
+			stub->_pi.space = (m & 0x20) != 0;
+			stub->_pi.shift = (m & 0x40) != 0;
+			g_scriptKey = m;
 			g->mainLoop();
-			if (g->_inp_demPos >= g->_res._demLen) break;
 		}
 		g_spriteHook = 0;
 		fclose(g_traceOut);

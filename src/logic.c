@@ -1076,6 +1076,29 @@ static int exec_op(unsigned char op, LivePGE *pge, int a, int b)
     }
     case 0x64:                                    /* gun shot */
         return col_detect_gun_hit(pge, a, b, 1);
+    case 0x72: {                                  /* restore the grid under a lift */
+        /* setCollisionState marks the grid (a lift is solid floor); before it
+         * moves, this puts back the original bytes at one spot.  Here that
+         * means dropping the overlay span that starts there.  Without it a
+         * lift accepted the command and never moved. */
+        unsigned int base;
+        unsigned char i;
+        int gy = (div36(pge->pos_y) & ~1) + a;
+        int gx = (pge->pos_x + 8) >> 4;
+        if (pge->room_location < 0x40) {
+            base = (unsigned int)(0x70 * pge->room_location + gx + gy * 16);
+            for (i = 0; i < ov_count; i++) {
+                if (ov_off[i] == base) {
+                    ov_count--;
+                    ov_off[i] = ov_off[ov_count];
+                    ov_len[i] = ov_len[ov_count];
+                    for (gx = 0; gx < OVERLAY_LEN; gx++) ov_val[i][gx] = ov_val[ov_count][gx];
+                    break;
+                }
+            }
+        }
+        return 0xFFFF;
+    }
     case 0x3C:                                    /* collide by animation Y, of a type */
         return col_test_b(pge, a, 5, b) ? 1 : 0;
     case 0x45:                                    /* collide by object number */
@@ -1353,7 +1376,25 @@ static void pge_process(LivePGE *pge)
         for (guard = 0; guard < 4000; guard++) {
             read_object(first, &obj);
             if (obj.type != pge->obj_type) { msg_clear(pge->index); return; }
-            if (pge_execute(pge, &obj)) { pge_setup_other_pieges(pge); break; }
+            if (pge_execute(pge, &obj)) {
+                /* pge_playAnimSound(): a new animation may carry a sound in its
+                 * header (byte 2) - footsteps, shots, machinery.  This is where
+                 * nearly all of the game's effects come from; the sound opcodes
+                 * in the scripts are only a handful of extras. */
+                const unsigned char *rec = map_ani(pge->obj_type);
+                unsigned char snd = rec[2];
+                if (snd && (pge->flags & 4)) {
+                    signed char cr = (signed char)s_room;
+                    unsigned char r = pge->room_location;
+                    if (r == s_room ||
+                        (cr >= 0 && cr < 0x40 &&
+                         (r == (unsigned char)ct_s(CT_DOWN + cr) || r == (unsigned char)ct_s(CT_UP + cr) ||
+                          r == (unsigned char)ct_s(CT_RIGHT + cr) || r == (unsigned char)ct_s(CT_LEFT + cr))))
+                        sfx_play((unsigned char)(snd - 1));
+                }
+                pge_setup_other_pieges(pge);
+                break;
+            }
             if (logic_bad_op) return;
             ++first;
         }

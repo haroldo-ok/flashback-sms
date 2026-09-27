@@ -177,8 +177,14 @@ above the level being played is never loaded, so the controller now moves into
 the highest such free slot (245).  Verified against the original engine with a
 scripted run: 170 frames of "stand, then draw the gun" on level 2 match exactly.
 
+Lifts are ridden with **button 1 + up/down** while standing on them.  The
+level-4 lift needed opcode 0x72, which restores the collision grid under a lift
+before it moves; verified against the original over a 315-frame scripted ride.
+
 Scripted runs: `fbdump DATA script OUT LEVEL KEYFILE` plays a level from its own
-start with a chosen key sequence through the original engine and traces it,
+start with a chosen key sequence, fed through the normal input path (the demo
+mechanism changes the current room while the level loads, and only objects in
+the current room are switched on at load, so it misrepresented level starts) through the original engine and traces it,
 and `make SELF_TEST=1` with that trace packed (`--logic ... --logic-level N`)
 checks the port against it frame by frame.
 
@@ -237,10 +243,12 @@ MIDI music plus sampled effects, so both are re-created rather than copied:
   voice and the noise voice, and the score's writes to those two are dropped
   while an effect sounds.
 
-Effects are triggered by the game's own sound opcodes, so they are as frequent
-as the original's scripts make them: level 1 asks for sound six times in its
-whole script, and one of those (the gun being drawn) has no sample even in the
-original.
+Effects come mostly from the animations: whenever an object's script moves it
+to a new animation, the engine reads a sound id from that animation's header
+and plays it if the object is in or next to the current room.  Footsteps,
+shots and machinery all sound that way; the script's own sound opcodes are only
+a handful of extras.  (An earlier build only had the opcodes, so almost nothing
+played.)
 
 ## Playing it
 From the title screen any button starts the game.  The d-pad moves, button 2
