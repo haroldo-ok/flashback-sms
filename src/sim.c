@@ -10,10 +10,11 @@
 #include "logic.h"
 #include "room.h"
 #include "sim.h"
+#include "hud.h"
 #include "psg.h"
 #include "tiledec.h"
 
-#define SPR_SLOTS  24
+#define SPR_SLOTS  22      /* tiles 0..43; 44..63 belong to the item displays */
 #define MAX_PARTS  40
 
 /* level parts 4_1/4_2 and 5_1/5_2 share one map, so the rooms of a part live
@@ -23,6 +24,7 @@ static const unsigned char part_map[7] = { 0, 1, 2, 3, 3, 5, 5 };
 unsigned char sim_sprites;
 unsigned int  sim_uploads;
 unsigned char sim_scroll, sim_room;
+unsigned char sim_room_idx = 0xFF;      /* its entry in the room table */
 
 static unsigned int  slot_tile[SPR_SLOTS];
 static unsigned char slot_used[SPR_SLOTS];
@@ -108,6 +110,8 @@ static void load_room(unsigned char room)
     if (idx == 0xFF) return;
     SMS_displayOff();
     room_load(idx);
+    sim_room_idx = idx;
+    hud_reset();
     unhide_items(idx, room);
     SMS_loadSpritePalette(spr_palette);
     SMS_displayOn();
@@ -228,4 +232,5 @@ void sim_step(void)
     }
     sim_sprites = n;
     SMS_copySpritestoSAT();
+    hud_update();                               /* the name of what Conrad stands on */
 }

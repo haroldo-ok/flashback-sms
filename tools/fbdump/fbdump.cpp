@@ -553,6 +553,26 @@ int main(int argc, char *argv[]) {
 		g_spriteHook = 0;
 		fclose(g_traceOut);
 		g_traceOut = 0;
+	} else if (!strcmp(mode, "hudpal")) {
+		/* the colours the engine uses for item icons (palette slot 0xA) and
+		 * for level texts, captured after it has drawn one of each */
+		mkdirp(out);
+		g->_currentLevel = 0;
+		g->loadLevelData();
+		g->resetGameState();
+		g->_currentRoom = g->_res._pgeInit[0].init_room;
+		if (g->_res._map) g->_vid.DOS_decodeMap(0, g->_currentRoom);
+		else g->_vid.DOS_decodeLev(0, g->_currentRoom);
+		g->drawIcon(0, 80, 8, 0xA);
+		g->_vid.drawString((const char *)"X", 8, 8, 0xE6);
+		stub->copyRect(0, 0, g->_vid._w, g->_vid._h, g->_vid._frontLayer, g->_vid._w);
+		stub->updateScreen(0);
+		char path[512];
+		snprintf(path, sizeof(path), "%s/hudpal.bin", out);
+		FILE *fp = fopen(path, "wb");
+		fwrite(stub->_pal, 1, 768, fp);
+		fclose(fp);
+		printf("hud palette captured\n");
 	} else if (!strcmp(mode, "sfx")) {
 		/* the sampled sound effects, for approximating on the PSG */
 		mkdirp(out);

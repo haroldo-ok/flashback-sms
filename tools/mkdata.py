@@ -5,7 +5,7 @@ emit the C index, and verify the packed bytes by decoding them.
     mkdata.py pack   --fmv gen/fmv.pkl --rooms gen/rooms.pkl --out gen
     mkdata.py verify --out gen --capture capture [--png shots]
 """
-import argparse, os, pickle, sys
+import argparse, os, pickle, struct, sys
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 import fmvenc as F
@@ -342,6 +342,50 @@ def pack(a):
         b.align_bank()
         print(f'sound effects: {sum(1 for x in sfx_tab if x[0])} of {top} entries')
 
+    # 6f. item icons, font glyphs and level texts (tools/hudconv.py), all in one
+    # bank at fixed offsets:
+    #   +0     glyph index per char 0x20..0x7F (0xFF = none)        96 bytes
+    #   +96    icon index per icon number 0..127 (0xFF = none)       128 bytes
+    #   +224   level part string tables: 7 x u16 offset (from +0)   14 bytes
+    #   +238   glyphs, 8 bytes each (1 bit per pixel)
+    #   ...    icons, 4 planar tiles each (128 bytes), then the tables and strings
+    hud_bank = 0
+    hud_glyphs = hud_icons = 0
+    hud_col = 15
+    if a.hud:
+        hd = pickle.load(open(a.hud, 'rb'))
+        blob = bytearray(238)
+        gl = sorted(hd['glyphs'])
+        for gi, c in enumerate(gl):
+            blob[c - 0x20] = gi
+        for c in range(0x20, 0x80):
+            if c not in hd['glyphs']:
+                blob[c - 0x20] = 0xFF
+        ic = sorted(hd['icons'])
+        for n in range(128):
+            blob[96 + n] = ic.index(n) if n in hd['icons'] else 0xFF
+        hud_glyphs = len(blob)
+        for c in gl:
+            blob += hd['glyphs'][c]
+        hud_icons = len(blob)
+        for n in ic:
+            for t in hd['icons'][n]:
+                blob += TP.planar(t) if hasattr(TP, 'planar') else F_planar(bytes(t))
+        for li, strs in enumerate(hd['texts']):
+            struct.pack_into('<H', blob, 224 + 2 * li, len(blob))
+            tab_at = len(blob)
+            blob += bytes(2 * len(strs))
+            for k, st in enumerate(strs):
+                struct.pack_into('<H', blob, tab_at + 2 * k, len(blob))
+                blob += st + b'\0'
+        assert len(blob) <= BANK, len(blob)
+        b.align_bank()
+        hud_bank = b.bank
+        b.data += bytes(blob)
+        b.align_bank()
+        hud_col = hd['text_col']
+        print(f'item names and inventory: {len(ic)} icons, {len(gl)} glyphs, {len(blob)} bytes in bank {hud_bank}')
+
     # 7. per-frame inputs + expected object state for the logic port
     logic_bank = 0
     if a.logic:
@@ -386,6 +430,11 @@ def pack(a):
         f'#define HAS_MENU {1 if a.menu else 0}',
         f'#define HAS_MUSIC {1 if a.music else 0}',
         f'#define HAS_SFX {1 if a.sfx else 0}',
+        f'#define HAS_HUD {1 if a.hud else 0}',
+        f'#define HUD_BANK {hud_bank}',
+        f'#define HUD_GLYPHS {hud_glyphs}',
+        f'#define HUD_ICONS {hud_icons}',
+        f'#define HUD_TEXT_COL {hud_col}',
         f'#define LOGIC_LEVEL {a.logic_level}',      # the level the harness trace plays
         f'#define LOGIC_LEVEL {a.logic_level}',     # which level the harness checks
         f'#define NUM_SFX {len(sfx_tab)}',
@@ -656,7 +705,7 @@ def verify(a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('mode', choices=['pack', 'verify'])
-    ap.add_argument('--fmv'); ap.add_argument('--rooms', nargs='*'); ap.add_argument('--sprites'); ap.add_argument('--title'); ap.add_argument('--levels', nargs='*'); ap.add_argument('--logic'); ap.add_argument('--anim'); ap.add_argument('--sprsets'); ap.add_argument('--menu'); ap.add_argument('--music', nargs='*'); ap.add_argument('--sfx'); ap.add_argument('--logic-level', type=int, default=0); ap.add_argument('--out', default='gen')
+    ap.add_argument('--fmv'); ap.add_argument('--rooms', nargs='*'); ap.add_argument('--sprites'); ap.add_argument('--title'); ap.add_argument('--levels', nargs='*'); ap.add_argument('--logic'); ap.add_argument('--anim'); ap.add_argument('--sprsets'); ap.add_argument('--menu'); ap.add_argument('--music', nargs='*'); ap.add_argument('--sfx'); ap.add_argument('--hud'); ap.add_argument('--logic-level', type=int, default=0); ap.add_argument('--out', default='gen')
     ap.add_argument('--capture', default='capture'); ap.add_argument('--png')
     ap.add_argument('--max-err', type=float, default=3.0)
     a = ap.parse_args()

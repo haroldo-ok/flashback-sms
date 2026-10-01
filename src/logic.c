@@ -1471,6 +1471,60 @@ void logic_start(unsigned char level_index)
     logic_running = 1;
 }
 
+/* --- for the item name display and the inventory screen --- */
+unsigned char logic_field8(unsigned char idx, unsigned char off)
+{
+    if (idx >= pge_num) return 0;
+    return init_field8(idx, off);
+}
+unsigned int logic_field16(unsigned char idx, unsigned char off)
+{
+    if (idx >= pge_num) return 0;
+    return init_field16(idx, off);
+}
+unsigned char logic_inv_first(void) { return inv_cur_get(0); }
+unsigned char logic_inv_next(unsigned char idx) { return inv_next_get(idx); }
+
+/* col_findCurrentCollidingObject() as drawLevelTexts uses it: something
+ * collectible Conrad touches, else an object of type 5 or 9 (switches,
+ * terminals).  Returns its index, or 0xFF. */
+unsigned char logic_touching(void)
+{
+    unsigned char pass, cs, other, t, guard;
+    LivePGE *c = &pge_live[0];
+    if (c->collision_slot == 0xFF || c->collision_slot >= COL_SLOTS) return 0xFF;
+    for (pass = 0; pass < 2; pass++) {
+        cs = col_table[c->collision_slot];
+        guard = 0;
+        while (cs != 0xFF && guard++ < COL_SLOTS) {
+            other = col_live[cs];
+            if (other != 0 && !bad_pge(other)) {
+                t = init_field8(other, 18);
+                if (pass == 0 ? (t == 3) : (t == 5 || t == 9)) {
+                    if (init_field8(other, 22)) return other;   /* has an icon */
+                }
+            }
+            cs = col_prev[cs];
+        }
+    }
+    return 0xFF;
+}
+
+/* pge_setCurrentInventoryObject(): make an item Conrad's current one */
+void logic_select_item(unsigned char item)
+{
+    unsigned char prev;
+    if (bad_pge(item)) return;
+    prev = inv_prev_item(0, item);
+    if (prev == 0) {
+        if (inv_cur_get(0) != item) return;
+    } else if (inv_next_get(prev) != item) return;
+    inv_remove(prev, item, 0);
+    inv_next_set(item, inv_cur_get(0));             /* back in at the head */
+    inv_cur_set(0, item);
+    inv_ref_set(item, 0);
+}
+
 /* an object's type from the level data (3 = collectible), for the renderer */
 unsigned char logic_object_type(unsigned char idx)
 {
