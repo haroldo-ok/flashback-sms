@@ -17,10 +17,12 @@
 #include "logic.h"
 #include "sim.h"
 #include "psg.h"
+#include "hud.h"
 
 #define ST_CUTSCENE 0
 #define ST_TITLE    1
 #define ST_SIM      2
+#define ST_INVENTORY 3
 
 unsigned char game_state;
 unsigned char seq_pos;            /* position in the intro sequence */
@@ -323,10 +325,20 @@ void main(void)
                     play_clip(c, 1);
                 }
             }
-            /* leave with PAUSE: button 1 is the run key while playing */
+            /* PAUSE opens the inventory, as the original's inventory key did */
             if (SMS_queryPauseRequested()) {
                 SMS_resetPauseRequest();
                 tick_acc = 0;
+                inv_open();
+                game_state = ST_INVENTORY;
+            }
+        } else if (game_state == ST_INVENTORY) {
+            unsigned char r = inv_step(pressed);
+            if (SMS_queryPauseRequested()) { SMS_resetPauseRequest(); r = 1; }
+            if (r == 1) {                         /* back to the game */
+                sim_resume();
+                game_state = ST_SIM;
+            } else if (r == 2) {                  /* both buttons: quit to the title */
                 SMS_setSpriteMode(SPRITEMODE_NORMAL);
                 hide_sprites();
                 enter_title();

@@ -357,6 +357,16 @@ static int cmp_op(long a, const char* op, long b) {
 }
 
 int main(int argc, char** argv) {
+    /* Real hardware and most emulators do NOT power on with RAM cleared.
+     * SMSTEST_RAM=zero keeps the old behaviour; the default is a pattern, so
+     * code that assumes zeroed memory fails here too. */
+    {
+        const char *mode = getenv("SMSTEST_RAM");
+        if (!mode || strcmp(mode, "zero")) {
+            unsigned seed = 0x1992;
+            for (int i = 0; i < RAM_SIZE; i++) { seed = seed * 1103515245u + 12345u; ram[i] = (uint8_t)(seed >> 16); }
+        }
+    }
     if (argc < 3) { fprintf(stderr, "usage: %s rom.sms script.txt\n", argv[0]); return 2; }
     FILE* f = fopen(argv[1], "rb");
     if (!f) { perror("rom"); return 2; }

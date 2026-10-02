@@ -17,5 +17,11 @@ extern unsigned char room_head[64], next_in_room[];
 extern unsigned int  logic_checksum, logic_expected;
 void logic_start(unsigned char level_index);   /* index into the packed levels */
 unsigned char logic_object_type(unsigned char idx);
+unsigned char logic_field8(unsigned char idx, unsigned char off);
+unsigned int  logic_field16(unsigned char idx, unsigned char off);
+unsigned char logic_inv_first(void);                  /* Conrad's current item */
+unsigned char logic_inv_next(unsigned char idx);
+unsigned char logic_touching(void);                   /* item under Conrad, or 0xFF */
+void logic_select_item(unsigned char item);
 unsigned char logic_step(void);          /* one 30 Hz game frame */
 #endif

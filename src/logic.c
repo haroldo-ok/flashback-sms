@@ -1565,6 +1565,29 @@ static int exec_op(unsigned char op, LivePGE *pge, int a, int b)
     }
     case 0x64:                                    /* gun shot */
         return col_detect_gun_hit(pge, a, b, 1);
+    case 0x72: {                                  /* restore the grid under a lift */
+        /* setCollisionState marks the grid (a lift is solid floor); before it
+         * moves, this puts back the original bytes at one spot.  Here that
+         * means dropping the overlay span that starts there.  Without it a
+         * lift accepted the command and never moved. */
+        unsigned int base;
+        unsigned char i;
+        int gy = (div36(pge->pos_y) & ~1) + a;
+        int gx = (pge->pos_x + 8) >> 4;
+        if (pge->room_location < 0x40) {
+            base = (unsigned int)(0x70 * pge->room_location + gx + gy * 16);
+            for (i = 0; i < ov_count; i++) {
+                if (ov_off[i] == base) {
+                    ov_count--;
+                    ov_off[i] = ov_off[ov_count];
+                    ov_len[i] = ov_len[ov_count];
+                    for (gx = 0; gx < OVERLAY_LEN; gx++) ov_val[i][gx] = ov_val[ov_count][gx];
+                    break;
+                }
+            }
+        }
+        return 0xFFFF;
+    }
     case 0x3C:                                    /* collide by animation Y, of a type */
         return col_test_ext(pge, a, 5, b) ? 1 : 0;
     case 0x45:                                    /* collide by object number */
@@ -2204,6 +2227,50 @@ static void pge_process(LivePGE *pge) __naked
     pop  ix
     ret
     __endasm;
+    const unsigned char *rec;
+    unsigned int seq_count, node, first, guard;
+    Obj obj;
+
+    s_facing = (pge->flags & 1) != 0;
+    s_pge_room = pge->room_location;
+    if (msg_head[pge->index] != 0xFF) pge_message_ack(pge);
+
+    rec = map_ani(pge->obj_type);
+    seq_count = rd16(rec);
+    if (seq_count <= pge->anim_seq) {
+        node = init_field16(pge->index, I_NODE);
+        SMS_mapROMBank(s_bank_a);
+        first = rd16((const unsigned char *)(0x8002 + pge_total * INIT_PGE_SIZE + node * 2));
+        first += pge->first_obj;
+        for (guard = 0; guard < 4000; guard++) {
+            read_object(first, &obj);
+            if (obj.type != pge->obj_type) { msg_clear(pge->index); return; }
+            if (pge_execute(pge, &obj)) {
+                /* pge_playAnimSound(): a new animation may carry a sound in its
+                 * header (byte 2) - footsteps, shots, machinery.  This is where
+                 * nearly all of the game's effects come from; the sound opcodes
+                 * in the scripts are only a handful of extras. */
+                const unsigned char *rec = map_ani(pge->obj_type);
+                unsigned char snd = rec[2];
+                if (snd && (pge->flags & 4)) {
+                    signed char cr = (signed char)s_room;
+                    unsigned char r = pge->room_location;
+                    if (r == s_room ||
+                        (cr >= 0 && cr < 0x40 &&
+                         (r == (unsigned char)ct_s(CT_DOWN + cr) || r == (unsigned char)ct_s(CT_UP + cr) ||
+                          r == (unsigned char)ct_s(CT_RIGHT + cr) || r == (unsigned char)ct_s(CT_LEFT + cr))))
+                        sfx_play((unsigned char)(snd - 1));
+                }
+                pge_setup_other_pieges(pge);
+                break;
+            }
+            if (logic_bad_op) return;
+            ++first;
+        }
+    }
+    pge_setup_anim(pge);
+    ++pge->anim_seq;
+    msg_clear(pge->index);
 }
 
 /* --------------------------------------------------------------- frame --- */
@@ -2310,6 +2377,58 @@ static LivePGE *scan_active(LivePGE *p) __naked
     ex   de, hl
     ret
     __endasm;
+/* --- for the item name display and the inventory screen --- */
+unsigned char logic_field8(unsigned char idx, unsigned char off)
+{
+    if (idx >= pge_num) return 0;
+    return init_field8(idx, off);
+}
+unsigned int logic_field16(unsigned char idx, unsigned char off)
+{
+    if (idx >= pge_num) return 0;
+    return init_field16(idx, off);
+}
+unsigned char logic_inv_first(void) { return inv_cur_get(0); }
+unsigned char logic_inv_next(unsigned char idx) { return inv_next_get(idx); }
+
+/* col_findCurrentCollidingObject() as drawLevelTexts uses it: something
+ * collectible Conrad touches, else an object of type 5 or 9 (switches,
+ * terminals).  Returns its index, or 0xFF. */
+unsigned char logic_touching(void)
+{
+    unsigned char pass, cs, other, t, guard;
+    LivePGE *c = &pge_live[0];
+    if (c->collision_slot == 0xFF || c->collision_slot >= COL_SLOTS) return 0xFF;
+    for (pass = 0; pass < 2; pass++) {
+        cs = col_table[c->collision_slot];
+        guard = 0;
+        while (cs != 0xFF && guard++ < COL_SLOTS) {
+            other = col_live[cs];
+            if (other != 0 && !bad_pge(other)) {
+                t = init_field8(other, 18);
+                if (pass == 0 ? (t == 3) : (t == 5 || t == 9)) {
+                    if (init_field8(other, 22)) return other;   /* has an icon */
+                }
+            }
+            cs = col_prev[cs];
+        }
+    }
+    return 0xFF;
+}
+
+/* pge_setCurrentInventoryObject(): make an item Conrad's current one */
+void logic_select_item(unsigned char item)
+{
+    unsigned char prev;
+    if (bad_pge(item)) return;
+    prev = inv_prev_item(0, item);
+    if (prev == 0) {
+        if (inv_cur_get(0) != item) return;
+    } else if (inv_next_get(prev) != item) return;
+    inv_remove(prev, item, 0);
+    inv_next_set(item, inv_cur_get(0));             /* back in at the head */
+    inv_cur_set(0, item);
+    inv_ref_set(item, 0);
 }
 
 /* an object's type from the level data (3 = collectible), for the renderer */
