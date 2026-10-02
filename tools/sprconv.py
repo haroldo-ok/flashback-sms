@@ -71,8 +71,11 @@ def main():
     raw = len(tiles64) * 32
     packed = sum(TP.SIZE[TP.tile_type(t)] for t in tiles64)
 
-    monster_of = []
-    for part, path in enumerate(a.levels):
+    # rows are indexed by level part (level_L<part>.fbl); a part the data
+    # does not have (the demo ships three) gets an empty row
+    by_part = {int(os.path.basename(p).split('_L')[1].split('.')[0]): p for p in a.levels}
+    monster_of = [b''] * (max(by_part) + 1)
+    for part, path in sorted(by_part.items()):
         lv = read_fbl(path)
         mlist = MONSTER_LISTS[part]
         row = []
@@ -84,7 +87,7 @@ def main():
                 row.append(mlist[node])
             else:
                 row.append(0xFF)
-        monster_of.append(bytes(row))
+        monster_of[part] = bytes(row)
 
     n_entries = sum(len(v) for v in sets.values())
     print(f'{n_entries} entries in {len(sets)} sets ({dropped} oversized dropped); '

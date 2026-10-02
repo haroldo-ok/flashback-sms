@@ -1,0 +1,14 @@
+# game data (not redistributable) and everything generated from it
+DATA/
+demo/
+capture/
+gen/
+build/
+shots/
+flashback.noi
+flashback-small.sms
+flashback-small.noi
+# locally built tools
+tools/fbdump/fbdump
+tools/fbdump/obj/
+tools/smstest/smstest

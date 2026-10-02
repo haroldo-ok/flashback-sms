@@ -109,10 +109,12 @@ def decode(t, rec):
     return bytes(out)
 
 
-def build(tiles64):
+def build(tiles64, raw=False):
     """tiles64: list of 64-index tiles in their current id order.
-    Returns (remap old->new id, regions {type: bytes}, starts (start1, start2))."""
-    enc = [encode(t) for t in tiles64]
+    Returns (remap old->new id, regions {type: bytes}, starts (start1, start2)).
+    raw=True stores every tile uncompressed (type 0): bigger, but the Z80
+    uploads it with a plain copy instead of rebuilding its planes."""
+    enc = [(0, planar(t)) for t in tiles64] if raw else [encode(t) for t in tiles64]
     order = sorted(range(len(enc)), key=lambda i: (enc[i][0] != 0, enc[i][0] != 1, enc[i][0] != 2, i))
     # stable: type 0 first, then 1, then 2
     order = [i for t in (0, 1, 2, 3) for i in range(len(enc)) if enc[i][0] == t]
