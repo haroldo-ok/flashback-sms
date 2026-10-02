@@ -59,6 +59,12 @@ verify:
 	python3 tools/mkdata.py verify --out gen --capture $(CAP)
 playtest: flashback.sms
 	$(SMSTEST) flashback.sms tests/playtest.txt
+# needs no harness data: boots, plays every level with the pad, opens and
+# closes the inventory (works on the shipped ROM, not only test builds)
+gameplay: flashback.sms $(SMSTEST)
+	@mkdir -p shots/gp
+	python3 tests/mkgameplay.py flashback.noi > build/gameplay.txt
+	$(SMSTEST) flashback.sms build/gameplay.txt
 # full gate: regenerate the test from the ROM data, run it, compare pixels
 $(SMSTEST): tools/smstest/smstest.c tools/smstest/z80.c
 	cc -O2 -o $@ tools/smstest/smstest.c tools/smstest/z80.c
@@ -99,4 +105,4 @@ small:
 
 clean:
 	rm -rf build flashback.sms flashback.noi
-.PHONY: all fbdump capture convert verify playtest check clean
+.PHONY: all fbdump capture convert verify playtest gameplay check clean

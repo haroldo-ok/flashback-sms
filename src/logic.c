@@ -2104,6 +2104,35 @@ static void pge_message_ack(LivePGE *pge)
     }
 }
 
+/* pge_playAnimSound(): a new animation may carry a sound in its header
+ * (byte 2) - footsteps, shots, machinery.  This is where nearly all of the
+ * game's effects come from; the sound opcodes in the scripts are only a
+ * handful of extras.  Called by pge_process (asm) once pge_execute has
+ * accepted a script record (see pge_record_taken). */
+static void pge_play_anim_sound(LivePGE *pge)
+{
+    const unsigned char *rec = map_ani(pge->obj_type);
+    unsigned char snd = rec[2];
+    if (snd && (pge->flags & 4)) {
+        signed char cr = (signed char)s_room;
+        unsigned char r = pge->room_location;
+        if (r == s_room ||
+            (cr >= 0 && cr < 0x40 &&
+             (r == (unsigned char)ct_s(CT_DOWN + cr) || r == (unsigned char)ct_s(CT_UP + cr) ||
+              r == (unsigned char)ct_s(CT_RIGHT + cr) || r == (unsigned char)ct_s(CT_LEFT + cr))))
+            sfx_play((unsigned char)(snd - 1));
+    }
+}
+
+/* A script record's conditions held: its animation may carry a sound, then
+ * the objects it signals are set up.  One call from pge_process's asm, so
+ * the branches there keep their reach. */
+static void pge_record_taken(LivePGE *pge)
+{
+    pge_play_anim_sound(pge);
+    pge_setup_other_pieges(pge);
+}
+
 /* One object's frame: react to pending messages, and once its animation has
  * run out walk its script from first_obj for the first record whose
  * conditions hold; then advance the animation.  In asm; the C it implements:
@@ -2115,7 +2144,9 @@ static void pge_message_ack(LivePGE *pge)
  *           ob = object_ptr(first)
  *           if (type(ob) != obj_type) { msg_clear(index); return; }
  *           ex_bank = ro_bank
- *           if (pge_execute(pge, ob)) { pge_setup_other_pieges(pge); break; }
+ *           if (pge_execute(pge, ob)) {
+ *               pge_record_taken(pge); break;
+ *           }
  *           if (logic_bad_op) return
  *       }
  *   }
@@ -2196,7 +2227,7 @@ static void pge_process(LivePGE *pge) __naked
     jr   z, 00012$
     push ix
     pop  hl
-    call _pge_setup_other_pieges
+    call _pge_record_taken
     jr   00020$
 00012$:
     ld   a, (_logic_bad_op)
@@ -2227,50 +2258,6 @@ static void pge_process(LivePGE *pge) __naked
     pop  ix
     ret
     __endasm;
-    const unsigned char *rec;
-    unsigned int seq_count, node, first, guard;
-    Obj obj;
-
-    s_facing = (pge->flags & 1) != 0;
-    s_pge_room = pge->room_location;
-    if (msg_head[pge->index] != 0xFF) pge_message_ack(pge);
-
-    rec = map_ani(pge->obj_type);
-    seq_count = rd16(rec);
-    if (seq_count <= pge->anim_seq) {
-        node = init_field16(pge->index, I_NODE);
-        SMS_mapROMBank(s_bank_a);
-        first = rd16((const unsigned char *)(0x8002 + pge_total * INIT_PGE_SIZE + node * 2));
-        first += pge->first_obj;
-        for (guard = 0; guard < 4000; guard++) {
-            read_object(first, &obj);
-            if (obj.type != pge->obj_type) { msg_clear(pge->index); return; }
-            if (pge_execute(pge, &obj)) {
-                /* pge_playAnimSound(): a new animation may carry a sound in its
-                 * header (byte 2) - footsteps, shots, machinery.  This is where
-                 * nearly all of the game's effects come from; the sound opcodes
-                 * in the scripts are only a handful of extras. */
-                const unsigned char *rec = map_ani(pge->obj_type);
-                unsigned char snd = rec[2];
-                if (snd && (pge->flags & 4)) {
-                    signed char cr = (signed char)s_room;
-                    unsigned char r = pge->room_location;
-                    if (r == s_room ||
-                        (cr >= 0 && cr < 0x40 &&
-                         (r == (unsigned char)ct_s(CT_DOWN + cr) || r == (unsigned char)ct_s(CT_UP + cr) ||
-                          r == (unsigned char)ct_s(CT_RIGHT + cr) || r == (unsigned char)ct_s(CT_LEFT + cr))))
-                        sfx_play((unsigned char)(snd - 1));
-                }
-                pge_setup_other_pieges(pge);
-                break;
-            }
-            if (logic_bad_op) return;
-            ++first;
-        }
-    }
-    pge_setup_anim(pge);
-    ++pge->anim_seq;
-    msg_clear(pge->index);
 }
 
 /* --------------------------------------------------------------- frame --- */
@@ -2377,6 +2364,8 @@ static LivePGE *scan_active(LivePGE *p) __naked
     ex   de, hl
     ret
     __endasm;
+}
+
 /* --- for the item name display and the inventory screen --- */
 unsigned char logic_field8(unsigned char idx, unsigned char off)
 {

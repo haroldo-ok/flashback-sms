@@ -14,7 +14,14 @@
 #include "psg.h"
 #include "tiledec.h"
 
-#define SPR_SLOTS  22      /* tiles 0..43; 44..63 belong to the item displays */
+/* Sprite tiles 0..43 are the sprite cache (two per 8x16 slot); 44..63
+ * belong to the item displays (src/hud.c).  The input-debugging build takes
+ * the cache's last slot for its marker, so it needs no HUD tile. */
+#if DEBUG_PAD
+#define SPR_SLOTS  21      /* tiles 0..41; 42..43 the pad marker */
+#else
+#define SPR_SLOTS  22      /* tiles 0..43 */
+#endif
 #define MAX_PARTS  40
 
 /* level parts 4_1/4_2 and 5_1/5_2 share one map, so the rooms of a part live
@@ -60,8 +67,8 @@ static unsigned char slot_alloc(unsigned int top, unsigned int bot)
     return 0xFF;                                /* every slot is in use */
 }
 
-#if SPR_SLOTS != 24
-#error slot_for below hard-codes 24 slots
+#if SPR_SLOTS < 1 || SPR_SLOTS > 127
+#error slot_for below counts slots in b and returns slot * 2 as a tile number
 #endif
 
 /* The VRAM slot already holding this (top, bottom) pair, marked used; else
@@ -75,7 +82,7 @@ static unsigned char slot_for(unsigned int top, unsigned int bot) __naked
     ld   (_sf_bot), de
     ex   de, hl                 ; de = top
     ld   hl, #_slot_tile
-    ld   b, #24
+    ld   b, #SPR_SLOTS
 00001$:
     ld   a, (hl)
     inc  hl
@@ -91,7 +98,7 @@ static unsigned char slot_for(unsigned int top, unsigned int bot) __naked
     ld   a, (hl)
     cp   a, d
     jr   nz, 00005$
-    ld   a, #24                 ; top matches: slot = 24 - b
+    ld   a, #SPR_SLOTS          ; top matches: slot = SPR_SLOTS - b
     sub  a, b
     ld   c, a
     push hl
@@ -460,10 +467,10 @@ static void unhide_items(unsigned char idx, unsigned char room)
 #if DEBUG_PAD
 /* Input debugging (make DEBUG_PAD=1): a row of markers at the top left shows
  * the pad the game logic received this tick - left, right, up, down, then
- * button 1 and button 2.  Tile 48 is free while playing: sprites stream
- * through 0..47 and rooms start at 64.  Cutscenes overwrite it, so it is
- * uploaded again with every room. */
-#define DEBUG_TILE 48
+ * button 1 and button 2.  Tiles 42..43 are kept for it while playing (this
+ * build's sprite cache stops at 41, and the item displays own 44..63).
+ * Cutscenes overwrite them, so they are uploaded again with every room. */
+#define DEBUG_TILE (SPR_SLOTS * 2)
 static void debug_pad_tiles(void)
 {
     unsigned char t[32], r, k, best = 1, lum, top = 0;

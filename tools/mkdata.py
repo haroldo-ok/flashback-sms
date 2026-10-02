@@ -35,7 +35,7 @@ class Blob:
         return BANK - len(self.data) % BANK
 
 
-def pack(a):
+def pack(a, spr_raw=True):
     fmv = pickle.load(open(a.fmv, 'rb')) if a.fmv else dict(dict=[], clips=[])
     rooms = []
     if a.title:                      # the title screen rides along as a room
@@ -238,8 +238,12 @@ def pack(a):
         import tilepack as TP
         sp = pickle.load(open(a.sprsets, 'rb'))
         # sprite tiles stream into VRAM every frame while things animate, so
-        # they are stored raw: a straight copy, no plane rebuilding
-        remap, regions, starts = TP.build(sp['tiles'], raw=True)
+        # they are stored raw when the ROM has room: a straight copy, no plane
+        # rebuilding.  Raw takes ~5 banks more than the compact form, and the
+        # full game with music, effects and the item displays has no 5 banks
+        # to spare, so pack() falls back to the compact form (src/tiledec.c
+        # decodes both) rather than fail - see the bank check at the end.
+        remap, regions, starts = TP.build(sp['tiles'], raw=spr_raw)
         banks = []
         for ty in (0, 1, 2, 3):
             b.align_bank()
@@ -288,7 +292,8 @@ def pack(a):
             b.data += row
         b.align_bank()
         spr_palette = list(sp['palette'])
-        print(f"sprite sets: {len(sp['tiles'])} 8x8 tiles, {len(where)} entries, tables for 6 sets")
+        print(f"sprite sets: {len(sp['tiles'])} 8x8 tiles ({'raw' if spr_raw else 'compact'}), "
+              f"{len(where)} entries, tables for 6 sets")
 
     print(f'  [pack] after sprites: bank {b.bank}')
     # 6c. level-select text (tools/menuconv.py): a few shared tiles, one row of
@@ -399,6 +404,9 @@ def pack(a):
         print(f"logic harness: {lg['frames']} frames at bank {logic_bank}")
     b.align_bank()
     if b.bank > MAX_BANKS:
+        if a.sprsets and spr_raw:
+            print(f'data needs {b.bank} banks with raw sprite tiles: packing them compact instead')
+            return pack(a, spr_raw=False)
         sys.exit(f'data needs {b.bank} banks: exceeds the 4 MB mapper range')
     os.makedirs(a.out, exist_ok=True)
     open(f'{a.out}/bank_data.bin', 'wb').write(b.data)

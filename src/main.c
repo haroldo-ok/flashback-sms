@@ -275,9 +275,11 @@ void main(void)
          * follow the game's speed */
         for (n = e; n; n--) { music_frame(); sfx_frame(); }
 
-        /* PAUSE only means something while playing; one pressed on the title
-         * or during a cutscene would otherwise quit the game on its first frame */
-        if (game_state != ST_SIM && SMS_queryPauseRequested()) SMS_resetPauseRequest();
+        /* PAUSE only means something while playing (it opens the inventory)
+         * and in the inventory (it closes it); one pressed on the title or
+         * during a cutscene would otherwise act on the next screen's first frame */
+        if (game_state != ST_SIM && game_state != ST_INVENTORY && SMS_queryPauseRequested())
+            SMS_resetPauseRequest();
 
         if (game_state == ST_CUTSCENE) {
             /* streams are 60 Hz ticks: run 5 (NTSC) or 6 (PAL) ticks per 5
